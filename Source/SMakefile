@@ -1,0 +1,55 @@
+# SMakefile for WorkSpace
+# 
+# WorkSpace - Amiga Public Screen Manager
+# Creates one or more public screens (virtual desktops) that are clones
+# of the Workbench screen mode. Acts as a commodity that can be opened
+# multiple times, with each instance managing its own workspace screen.
+#
+
+# Program name
+PROGRAM = Workspace
+
+# Source files
+SRCS = workspace.c
+
+# Object files
+OBJS = workspace.o
+
+# Compiler and linker
+CC = sc
+LINK = slink
+
+# Default target
+all: $(PROGRAM)
+
+# Create the WorkSpace executable
+$(PROGRAM): $(OBJS)
+	$(LINK) FROM sc:lib/c.o $(OBJS) TO $(PROGRAM) STRIPDEBUG NODEBUG LIB lib:small.lib sc:lib/sc.lib BATCH
+
+# Compile the source files
+.c.o:
+	$(CC) $*.c OBJNAME=$*.o IDIR=include:
+
+# Compile WorkSpace files
+workspace.o: workspace.c
+	$(CC) workspace.c OBJNAME=workspace.o IDIR=include:
+
+# Clean target
+clean:
+	Delete $(OBJS) $(PROGRAM) workspace.o
+
+# Install target
+install:
+	@echo "Installing Workspace to SDK/C..."
+	@copy $(PROGRAM) to /SDK/C/$(PROGRAM) CLONE
+
+# Dependencies
+workspace.o: workspace.c
+
+
+
+
+
+
+
+
