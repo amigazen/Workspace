@@ -13,6 +13,7 @@
 #include <exec/execbase.h>
 #include <exec/memory.h>
 #include <dos/dos.h>
+#include <dos/dostags.h>
 #include <intuition/intuition.h>
 #include <intuition/intuitionbase.h>
 #include <intuition/screens.h>
@@ -61,6 +62,26 @@
 APTR ObtainDTDrawInfoA(Object *o, struct TagItem *attrs);
 LONG DrawDTObjectA(struct RastPort *rp, Object *o, LONG x, LONG y, LONG w, LONG h, LONG th, LONG tv, struct TagItem *attrs);
 VOID ReleaseDTDrawInfo(Object *o, APTR handle);
+
+/* Tag definitions for SystemTagList() - from dos/dostags.h */
+/* These are defined here in case dos/dostags.h is not available in the include path */
+#ifndef SYS_Asynch
+#define SYS_Dummy     (TAG_USER + 32)
+#define SYS_Input     (SYS_Dummy + 1)   /* specifies the input filehandle */
+#define SYS_Output    (SYS_Dummy + 2)   /* specifies the output filehandle */
+#define SYS_Asynch    (SYS_Dummy + 3)   /* run asynch, close input/output on exit */
+#define SYS_UserShell (SYS_Dummy + 4)   /* send to user shell instead of boot shell */
+#define SYS_CmdStream (SYS_Dummy + 8)   /* command input stream, closed on exit (V47) */
+#define SYS_InName    (SYS_Dummy + 9)   /* file name opened for input instead of file handle (V47) */
+#define SYS_OutName   (SYS_Dummy + 10)  /* file name opened for output instead of file handle (V47) */
+#define SYS_CmdName   (SYS_Dummy + 11)  /* file name for command input (V47) */
+#endif
+
+#ifndef NP_StackSize
+#define NP_Dummy      (TAG_USER + 1000)
+#define NP_StackSize  (NP_Dummy + 11)   /* stacksize for process - default 4000 */
+#endif
+
 #include <stdlib.h>
 #include <stdarg.h>
 
@@ -104,6 +125,7 @@ VOID ParseToolTypes(VOID);
 BOOL ParseCommandLine(VOID);
 VOID HandleAboutMenu(VOID);
 VOID HandleCloseMenu(VOID);
+VOID HandleShellConsoleMenu(VOID);
 BOOL CheckWorkspaceVisitors(VOID);
 VOID HandleSetAsDefaultMenu(struct MenuItem *menuItem);
 VOID HandleDefaultPubScreenSubMenu(STRPTR screenName);
@@ -122,6 +144,7 @@ const long oslibversion = 47L;
 struct WorkspaceState {
     struct Screen *workspaceScreen;
     struct Window *backdropWindow;  /* Standard Intuition window */
+    struct Window *shellWindow;     /* Separate backdrop window for shell console */
     struct Menu *menuStrip;
     CxObj *commodityBroker;
     CxObj *commoditySender;
@@ -153,7 +176,9 @@ struct WorkspaceState {
 static struct WorkspaceState wsState;
 
 /* Tooltype defaults */
-static STRPTR defaultShellPath = "CON:0/0/640/200/Workspace Shell/CLOSE/PUBSCREEN %s";
+/* Note: Default uses WINDOW parameter - user can override with custom path */
+/* For custom path, use %p for window pointer in hex format */
+static STRPTR defaultShellPath = NULL;  /* Will use WINDOW parameter by default */
 static BOOL defaultShellEnabled = FALSE;
 static STRPTR defaultBackdropImage = NULL;
 
@@ -310,18 +335,26 @@ int main(int argc, char *argv[])
         BOOL done = FALSE;
         ULONG timerSignal = 0;
         
-        /* Wait for messages - check if window exists */
+        /* Wait for messages - check if backdrop window exists */
         if (wsState.backdropWindow == NULL) {
             Printf("Workspace: ERROR - Backdrop window is NULL, exiting\n");
             wsState.quitFlag = TRUE;
             break;
         }
         
+        /* Check if shell window was closed by console (when shell ends) */
+        if (wsState.shellWindow != NULL && wsState.shellWindow->UserPort == NULL) {
+            /* Shell window was closed by console - shell has ended */
+            Printf("Workspace: Shell console ended - shell window was closed by console\n");
+            wsState.shellWindow = NULL;  /* Clear pointer */
+            wsState.shellEnabled = FALSE;  /* Reset shell enabled flag */
+        }
+        
         /* Get window signal from UserPort */
-        if (wsState.backdropWindow->UserPort) {
+        if (wsState.backdropWindow && wsState.backdropWindow->UserPort) {
             windowSignal = (1L << wsState.backdropWindow->UserPort->mp_SigBit);
         } else {
-            Printf("Workspace: ERROR - Window UserPort is NULL, exiting\n");
+            Printf("Workspace: ERROR - Window or UserPort is NULL, exiting\n");
             wsState.quitFlag = TRUE;
             break;
         }
@@ -389,12 +422,46 @@ int main(int argc, char *argv[])
         }
         
         /* Process window messages using standard Intuition message handling */
-        if (windowSignal && (signals & windowSignal)) {
+        if (windowSignal && (signals & windowSignal) && wsState.backdropWindow != NULL) {
             struct IntuiMessage *imsg;
             struct Message *msg;
+            struct MsgPort *userPort;
+            
+            /* Check if window is still valid - if UserPort is NULL, window was closed */
+            userPort = wsState.backdropWindow ? wsState.backdropWindow->UserPort : NULL;
+            if (userPort == NULL) {
+                /* Window was closed (likely by shell console) - recreate if shell was enabled */
+                Printf("Workspace: Window UserPort is NULL - window was closed\n");
+                if (wsState.shellEnabled) {
+                    Printf("Workspace: Shell console ended - window was closed by console, recreating backdrop window\n");
+                    wsState.shellEnabled = FALSE;  /* Reset shell enabled flag */
+                    wsState.backdropWindow = NULL;  /* Clear invalid pointer */
+                    if (!CreateBackdropWindow()) {
+                        Printf("Workspace: ERROR - Failed to recreate backdrop window after shell ended\n");
+                        wsState.quitFlag = TRUE;
+                        break;
+                    }
+                    /* Recreate menu on new window */
+                    if (!CreateMenuStrip()) {
+                        Printf("Workspace: ERROR - Failed to recreate menu after shell ended\n");
+                        wsState.quitFlag = TRUE;
+                        break;
+                    }
+                    /* Activate the new window */
+                    if (wsState.backdropWindow) {
+                        ActivateWindow(wsState.backdropWindow);
+                    }
+                    Printf("Workspace: Backdrop window recreated successfully after shell ended\n");
+                    continue;  /* Restart loop with new window */
+                } else {
+                    Printf("Workspace: ERROR - Window closed but shell not enabled, exiting\n");
+                    wsState.quitFlag = TRUE;
+                    break;
+                }
+            }
             
             /* Get all messages from window's UserPort */
-            while ((msg = GetMsg(wsState.backdropWindow->UserPort)) != NULL) {
+            while (wsState.backdropWindow != NULL && (msg = GetMsg(userPort)) != NULL) {
                 imsg = (struct IntuiMessage *)msg;
                 
                 switch (imsg->Class) {
@@ -453,6 +520,10 @@ int main(int argc, char *argv[])
                                                     case 2:  /* Quit */
                                                         HandleCloseMenu();
                                                         done = TRUE;
+                                                        break;
+                                                    
+                                                    case 3:  /* Shell Console */
+                                                        HandleShellConsoleMenu();
                                                         break;
                                                     
                                                     default:
@@ -1090,6 +1161,31 @@ VOID HandleAboutMenu(VOID)
     /* TODO: Show about requester */
 }
 
+VOID HandleShellConsoleMenu(VOID)
+{
+    /* Toggle shell console - create it if not already enabled */
+    if (!wsState.shellEnabled) {
+        /* Enable shell console */
+        wsState.shellEnabled = TRUE;
+        
+        /* Free backdrop image if loaded (shell and backdrop are mutually exclusive) */
+        if (wsState.backdropImageObj) {
+            FreeBackdropImage();
+        }
+        
+        /* Create shell console */
+        if (!CreateShellConsole()) {
+            Printf("Workspace: ERROR - Failed to create shell console\n");
+            wsState.shellEnabled = FALSE;
+        } else {
+            Printf("Workspace: Shell console enabled\n");
+        }
+    } else {
+        /* Shell is already enabled - just inform user */
+        Printf("Workspace: Shell console is already running\n");
+    }
+}
+
 /* Check visitor count for all Workspace screens (not Workbench) */
 BOOL CheckWorkspaceVisitors(VOID)
 {
@@ -1120,7 +1216,11 @@ BOOL CheckWorkspaceVisitors(VOID)
     UnlockPubScreenList();
     
     Printf("Workspace: Total visitor windows on all Workspace screens: %d\n", (int)totalVisitors);
-    return (totalVisitors > 0) ? TRUE : FALSE;
+    if (totalVisitors > 0) {
+        return TRUE;
+    } else {
+        return FALSE;
+    }
 }
 
 VOID HandleCloseMenu(VOID)
@@ -1307,6 +1407,13 @@ struct NewMenu *BuildDefaultPubScreenMenu(ULONG *menuCount)
     newMenu[idx].nm_UserData = (APTR)((0UL << 16) | (1UL << 8) | 0UL); /* Menu 0, Item 1, Sub 0 */
     idx++;
     
+    /* Add "Shell Console" - this is a regular menu item, not a sub-item */
+    newMenu[idx].nm_Type = NM_ITEM;
+    newMenu[idx].nm_Label = "Open AmigaShell";
+    newMenu[idx].nm_CommKey = "S";
+    newMenu[idx].nm_UserData = (APTR)((0UL << 16) | (3UL << 8) | 0UL); /* Menu 0, Item 3, Sub 0 */
+    idx++;
+    
     /* Add "Quit" - this is a regular menu item, not a sub-item */
     newMenu[idx].nm_Type = NM_ITEM;
     newMenu[idx].nm_Label = "Quit";
@@ -1430,18 +1537,224 @@ VOID FreeMenuStrip(VOID)
     }
 }
 
+/* Create shell backdrop window - separate from main backdrop */
+BOOL CreateShellWindow(VOID)
+{
+    ULONG screenWidth, screenHeight;
+    WORD windowTop;
+    WORD windowHeight = 200;  /* Fixed height: 200px at bottom */
+    
+    /* Prerequisites check */
+    if (!wsState.workspaceScreen) {
+        Printf("Workspace: Cannot create shell window - screen not available\n");
+        return FALSE;
+    }
+    
+    /* Get screen dimensions */
+    screenWidth = wsState.workspaceScreen->Width;
+    screenHeight = wsState.workspaceScreen->Height;
+    
+    /* Handle case where screen dimensions might be 0 (use ViewPort dimensions) */
+    if (screenWidth == 0 && wsState.workspaceScreen->ViewPort.DWidth > 0) {
+        screenWidth = wsState.workspaceScreen->ViewPort.DWidth;
+        screenHeight = wsState.workspaceScreen->ViewPort.DHeight;
+    }
+    
+    /* Calculate window position - at bottom of screen */
+    windowTop = screenHeight - windowHeight;
+    
+    /* Validate dimensions */
+    if (screenWidth <= 0 || windowHeight <= 0 || windowTop < 0) {
+        Printf("Workspace: ERROR - Invalid dimensions for shell window (Width=%lu, Height=%d, Top=%d)\n",
+               screenWidth, windowHeight, windowTop);
+        return FALSE;
+    }
+    
+    Printf("Workspace: Creating shell window: Left=0, Top=%d, Width=%lu, Height=%d\n",
+           windowTop, screenWidth, windowHeight);
+    
+    /* Open shell backdrop window - positioned at bottom of screen */
+    wsState.shellWindow = OpenWindowTags(NULL,
+        WA_Left, 0,
+        WA_Top, windowTop,
+        WA_Width, screenWidth,
+        WA_Height, windowHeight,
+        WA_CustomScreen, wsState.workspaceScreen,
+        WA_Backdrop, TRUE,
+        WA_Borderless, TRUE,
+        WA_DragBar, FALSE,
+        WA_IDCMP, 0,  /* No IDCMP needed - shell will handle it */
+        WA_DetailPen, -1,
+        WA_BlockPen, -1,
+        WA_Activate, FALSE,
+        TAG_DONE);
+    
+    if (wsState.shellWindow == NULL) {
+        Printf("Workspace: ERROR - Failed to open shell window (OpenWindowTags returned NULL)\n");
+        return FALSE;
+    }
+    
+    Printf("Workspace: Shell window opened successfully: 0x%08lX\n", (ULONG)wsState.shellWindow);
+    Printf("Workspace: Shell window dimensions: LeftEdge=%ld, TopEdge=%ld, Width=%ld, Height=%ld\n",
+           (LONG)wsState.shellWindow->LeftEdge, (LONG)wsState.shellWindow->TopEdge,
+           (LONG)wsState.shellWindow->Width, (LONG)wsState.shellWindow->Height);
+    
+    return TRUE;
+}
+
 /* Create shell console */
 BOOL CreateShellConsole(VOID)
 {
-    /* TODO: Implement shell console creation */
-    /* Use CON: device with PUBSCREEN keyword */
+    STRPTR conspec = NULL;
+    UBYTE conspecBuffer[256];
+    WORD windowWidth, windowHeight;
+    LONG result;
+    
+    /* Prerequisites check */
+    if (!wsState.workspaceScreen || !wsState.shellEnabled) {
+        Printf("Workspace: Cannot create shell console - prerequisites not met\n");
+        return FALSE;
+    }
+    
+    /* Create shell backdrop window if it doesn't exist */
+    if (!wsState.shellWindow) {
+        if (!CreateShellWindow()) {
+            Printf("Workspace: ERROR - Failed to create shell window\n");
+            return FALSE;
+        }
+    }
+    
+    /* Get dimensions from the shell window */
+    windowWidth = wsState.shellWindow->Width;
+    windowHeight = wsState.shellWindow->Height;
+    
+    /* Validate dimensions */
+    if (windowWidth <= 0 || windowHeight <= 0) {
+        Printf("Workspace: ERROR - Invalid dimensions for shell console (Width=%d, Height=%d)\n",
+               windowWidth, windowHeight);
+        return FALSE;
+    }
+    
+    Printf("Workspace: Shell console dimensions - width=%d, height=%d\n",
+           windowWidth, windowHeight);
+    
+    /* Build CON: device specifier using WINDOW parameter */
+    /* According to RKM: WINDOW instructs the console to hijack an already open window */
+    /* Format: CON:x/y/width/height/title/WINDOW 0x<hex_address> */
+    if (wsState.shellPath && wsState.shellPath[0] != '\0') {
+        /* Use custom shell path */
+        SNPrintf(conspecBuffer, sizeof(conspecBuffer), wsState.shellPath, wsState.workspaceName);
+        conspec = conspecBuffer;
+    } else {
+        /* Use default: CON:0/0/width/height//WINDOW 0x<hex_address> */
+        {
+            struct Window *win = wsState.shellWindow;
+            ULONG windowAddr;
+            
+            /* Get window address */
+            windowAddr = (ULONG)win;
+            
+            /* Build CON: specifier */
+            SNPrintf(conspecBuffer, sizeof(conspecBuffer),
+                     "CON:0/0/%ld/%ld//WINDOW 0x%08lX",
+                     (LONG)windowWidth, (LONG)windowHeight, windowAddr);
+            conspec = conspecBuffer;
+            
+            Printf("Workspace: CON: specifier: '%s'\n", conspec);
+            Printf("Workspace: Shell window pointer: 0x%08lX\n", windowAddr);
+        }
+    }
+    
+    Printf("Workspace: Creating shell console with CON: spec: %s\n", conspec);
+    
+    /* Ensure window is on the workspace screen and active before hijacking */
+    if (wsState.shellWindow && wsState.shellWindow->WScreen != wsState.workspaceScreen) {
+        Printf("Workspace: WARNING - Shell window is not on workspace screen!\n");
+    }
+    
+    /* Activate window and bring to front */
+    if (wsState.shellWindow) {
+        ActivateWindow(wsState.shellWindow);
+        WindowToFront(wsState.shellWindow);
+        ScreenToFront(wsState.workspaceScreen);
+    }
+    
+    /* Use System() directly instead of NewShell command */
+    /* According to RKM: NewShell uses System() with SYS_InName pointing to CON: specifier */
+    /* Format: SystemTags(NULL, SYS_InName, window, SYS_CmdStream, ..., SYS_Output, 0, ...) */
+    {
+        BPTR cmdStream = 0;
+        BPTR startupFile = 0;
+        struct TagItem tags[8];
+        
+        /* Open startup file (default is S:Shell-Startup) */
+        startupFile = Open("S:Shell-Startup", MODE_OLDFILE);
+        if (startupFile != 0) {
+            cmdStream = startupFile;
+        }
+        
+        /* Build TagItem array - can't use variables in initializers in C89 */
+        /* According to RKM: With SYS_Asynch, must provide SYS_Input/InName AND SYS_Output/OutName */
+        /* Setting SYS_Output to ZERO makes it clone from input (the CON: device) */
+        tags[0].ti_Tag = SYS_InName;
+        tags[0].ti_Data = (ULONG)conspec;  /* CON: specifier with WINDOW parameter */
+        tags[1].ti_Tag = SYS_CmdStream;
+        tags[1].ti_Data = (ULONG)cmdStream;  /* Startup file stream */
+        tags[2].ti_Tag = SYS_Output;
+        tags[2].ti_Data = 0;  /* ZERO - clone from input (CON: device) to preserve our stdout */
+        tags[3].ti_Tag = SYS_Asynch;
+        tags[3].ti_Data = TRUE;  /* Must be TRUE to avoid blocking */
+        tags[4].ti_Tag = SYS_UserShell;
+        tags[4].ti_Data = TRUE;  /* Use user shell */
+        tags[5].ti_Tag = NP_StackSize;
+        tags[5].ti_Data = 4096;
+        tags[6].ti_Tag = NP_Name;
+        tags[6].ti_Data = (ULONG)"Workspace Shell";  /* Process name */
+        tags[7].ti_Tag = TAG_DONE;
+        tags[7].ti_Data = 0;
+        
+        /* Call System() directly with CON: specifier using WINDOW parameter */
+        /* Pass NULL as command since we're using SYS_CmdStream for startup file */
+        /* With NULL command and SYS_Asynch, shell reads from SYS_CmdStream then SYS_InName */
+        result = SystemTagList(NULL, tags);
+        
+        /* Note: cmdStream will be closed by System() when shell terminates */
+    }
+    
+    if (result == 0) {
+        Printf("Workspace: ERROR - Failed to create shell console (System returned 0)\n");
+        return FALSE;
+    }
+    
+    /* IMPORTANT: When using WINDOW parameter, the console takes ownership of the window */
+    /* The console will close the window when it exits */
+    /* Don't set shellWindow to NULL - we'll detect when it's closed by checking UserPort */
+    Printf("Workspace: Shell console launched successfully - shell window ownership transferred to console\n");
+    Printf("Workspace: Note - when shell ends, console will close the shell window\n");
+    Printf("Workspace: Shell console created successfully\n");
     return TRUE;
 }
 
 /* Close shell console */
 VOID CloseShellConsole(VOID)
 {
-    /* TODO: Implement shell console cleanup */
+    /* If shell window exists and hasn't been donated to the console, close it */
+    /* Check if window is still valid (UserPort not NULL means we still own it) */
+    if (wsState.shellWindow != NULL) {
+        if (wsState.shellWindow->UserPort != NULL) {
+            /* We still own the window - close it */
+            Printf("Workspace: Closing shell window (not donated to console)\n");
+            CloseWindow(wsState.shellWindow);
+            wsState.shellWindow = NULL;
+        } else {
+            /* Window was donated to console - don't close it, console will close it */
+            Printf("Workspace: Shell window was donated to console - console will close it\n");
+            wsState.shellWindow = NULL;  /* Clear pointer, but don't close */
+        }
+    }
+    
+    wsState.shellEnabled = FALSE;
+    Printf("Workspace: Shell console cleanup complete\n");
 }
 
 /* Load backdrop image */
@@ -1468,7 +1781,7 @@ BOOL ParseCommandLine(VOID)
     SetIoErr(0);
     
     /* Parse arguments: PUBNAME/K, CX_NAME/K, BACKDROP/K, CX_POPKEY/K */
-    wsState.rda = ReadArgs("PUBNAME/K,CX_NAME/K,BACKDROP/S,CX_POPKEY/K", argArray, NULL);
+    wsState.rda = ReadArgs("PUBNAME/K,CX_NAME/K,BACKDROP/K,CX_POPKEY/K", argArray, NULL);
     if (!wsState.rda) {
         LONG errorCode = IoErr();
         if (errorCode != 0) {
