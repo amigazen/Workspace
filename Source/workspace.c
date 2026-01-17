@@ -764,7 +764,7 @@ int main(int argc, char *argv[])
     /* Expected: visitor count should be 1 (only backdrop window is open) */
     {
         WORD visitorCount = CheckWorkspaceVisitors();
-        Printf("Workspace: Visitor count: %d\n", visitorCount);
+        Printf("Workspace: Visitor count: %ld\n", (LONG)visitorCount);
         
         if (visitorCount == 0) {
             /* ERROR: Should have at least the backdrop window (count = 1) */
@@ -801,7 +801,7 @@ int main(int argc, char *argv[])
             /* Subtract 1 for the backdrop window when showing message */
             {
                 WORD otherWindows = visitorCount - 1;
-                Printf("Workspace: %d visitor window(s) total (1 backdrop + %d others)\n", visitorCount, otherWindows);
+                Printf("Workspace: %ld visitor window(s) total (1 backdrop + %ld others)\n", (LONG)visitorCount, (LONG)otherWindows);
             }
             Printf("Workspace: Showing requester and aborting cleanup - app will continue running\n");
             
@@ -1260,8 +1260,8 @@ BOOL CloseWorkspaceScreen(VOID)
                 if (psn->psn_Node.ln_Name && 
                     strncmp(psn->psn_Node.ln_Name, "Workspace.", 10) == 0) {
                     visitorCount += (WORD)psn->psn_VisitorCount;
-                    Printf("Workspace: Screen '%s' has %d visitor windows\n", 
-                           psn->psn_Node.ln_Name, (int)psn->psn_VisitorCount);
+                    Printf("Workspace: Screen '%s' has %ld visitor windows\n", 
+                           psn->psn_Node.ln_Name, (LONG)psn->psn_VisitorCount);
                 }
                 psn = (struct PubScreenNode *)psn->psn_Node.ln_Succ;
             }
@@ -1299,7 +1299,7 @@ BOOL CloseWorkspaceScreen(VOID)
                 }
                 EasyRequestArgs(reqWindow, &es, NULL, NULL);
             }
-        Printf("Workspace: Cannot close - %d visitor windows still open, user must close them\n", visitorCount);
+        Printf("Workspace: Cannot close - %ld visitor windows still open, user must close them\n", (LONG)visitorCount);
         /* Return FALSE - screen was not closed */
         return FALSE;
         }
@@ -1408,13 +1408,13 @@ BOOL CreateBackdropWindow(VOID)
     if (wsState.workspaceScreen->Width == 0 && wsState.workspaceScreen->ViewPort.DWidth > 0) {
         screenWidth = 640; /*wsState.workspaceScreen->ViewPort.DWidth;*/
         screenHeight = 480; /*wsState.workspaceScreen->ViewPort.DHeight;*/
-        Printf("Workspace: Using ViewPort dimensions: Width=%lu, Height=%lu\n",
-               screenWidth, screenHeight);
+        Printf("Workspace: Using ViewPort dimensions: Width=%ld, Height=%ld\n",
+               (LONG)screenWidth, (LONG)screenHeight);
     } else {
         screenWidth = wsState.workspaceScreen->Width;
         screenHeight = wsState.workspaceScreen->Height;
-        Printf("Workspace: Using Screen dimensions: Width=%lu, Height=%lu\n",
-               screenWidth, screenHeight);
+        Printf("Workspace: Using Screen dimensions: Width=%ld, Height=%ld\n",
+               (LONG)screenWidth, (LONG)screenHeight);
     }
     
     /* Calculate title bar height - BarHeight is one less than actual height */
@@ -1422,15 +1422,15 @@ BOOL CreateBackdropWindow(VOID)
     windowTop = titleBarHeight;
     windowHeight = screenHeight - titleBarHeight;
     
-    Printf("Workspace: Screen BarHeight=%d, TitleBarHeight=%d\n", 
-           wsState.workspaceScreen->BarHeight, titleBarHeight);
-    Printf("Workspace: Creating window: Left=0, Top=%d, Width=%lu, Height=%d\n", 
-           windowTop, screenWidth, windowHeight);
+    Printf("Workspace: Screen BarHeight=%ld, TitleBarHeight=%ld\n", 
+           (LONG)wsState.workspaceScreen->BarHeight, (LONG)titleBarHeight);
+    Printf("Workspace: Creating window: Left=0, Top=%ld, Width=%ld, Height=%ld\n", 
+           (LONG)windowTop, (LONG)screenWidth, (LONG)windowHeight);
     
     /* Validate dimensions - OpenWindowTags will fail or create invalid window if dimensions are 0 */
     if (screenWidth <= 0 || windowHeight <= 0) {
-        Printf("Workspace: ERROR - Invalid window dimensions: Width=%lu, Height=%d\n",
-               screenWidth, windowHeight);
+        Printf("Workspace: ERROR - Invalid window dimensions: Width=%ld, Height=%ld\n",
+               (LONG)screenWidth, (LONG)windowHeight);
         return FALSE;
     }
     
@@ -1597,8 +1597,8 @@ WORD GetVisitorWindows(struct WindowInfo *windows, WORD maxWindows, BOOL exclude
             /* Use a wider tolerance for TopEdge since it might vary slightly */
             if (win->TopEdge >= expectedTop - 20 && win->TopEdge <= expectedTop + 20 &&
                 win->Height >= expectedHeight - 20 && win->Height <= expectedHeight + 20) {
-                Printf("Workspace: GetVisitorWindows - skipping shell window (by characteristics: TopEdge=%d, Height=%d, expected Top=%d, Height=%d)\n",
-                       win->TopEdge, win->Height, expectedTop, expectedHeight);
+                Printf("Workspace: GetVisitorWindows - skipping shell window (by characteristics: TopEdge=%ld, Height=%ld, expected Top=%ld, Height=%ld)\n",
+                       (LONG)win->TopEdge, (LONG)win->Height, (LONG)expectedTop, (LONG)expectedHeight);
                 win = win->NextWindow;
                 continue;
             }
@@ -1621,12 +1621,13 @@ WORD GetVisitorWindows(struct WindowInfo *windows, WORD maxWindows, BOOL exclude
         windows[count].maxHeight = win->WScreen->Height - titleBarHeight;
         
         count++;
-        Printf("Workspace: GetVisitorWindows - count is now %d after including window 0x%lx\n", 
-               count, (ULONG)win);
+        /* Split Printf to avoid potential stack corruption */
+        Printf("Workspace: GetVisitorWindows - count is now %ld\n", (LONG)count);
+        Printf("Workspace: GetVisitorWindows - included window 0x%lx\n", (ULONG)win);
         win = win->NextWindow;
     }
     
-    Printf("Workspace: GetVisitorWindows - final count before return: %d\n", count);
+    Printf("Workspace: GetVisitorWindows - final count before return: %ld\n", (LONG)count);
     return count;
 }
 
@@ -1665,14 +1666,21 @@ VOID TileWindowsHorizontally(VOID)
     /* Get all visitor windows (excluding backdrop, excluding shell) */
     Printf("Workspace: Getting visitor windows...\n");
     windowCount = GetVisitorWindows(windows, 32, TRUE);
-    Printf("Workspace: GetVisitorWindows returned %d windows\n", windowCount);
+    Printf("Workspace: GetVisitorWindows returned %ld windows\n", (LONG)windowCount);
     
+    /* Early return if no windows - check immediately after function call */
     if (windowCount == 0) {
         Printf("Workspace: No windows to tile - returning early\n");
         return;
     }
     
-    Printf("Workspace: Tiling %d windows horizontally\n", windowCount);
+    /* Double-check windowCount before proceeding */
+    if (windowCount == 0 || windowCount > 32) {
+        Printf("Workspace: ERROR - invalid windowCount=%ld, aborting\n", (LONG)windowCount);
+        return;
+    }
+    
+    Printf("Workspace: Tiling %ld windows horizontally\n", (LONG)windowCount);
     
     /* Calculate window dimensions - prevent division by zero */
     if (windowCount == 0) {
@@ -1688,47 +1696,54 @@ VOID TileWindowsHorizontally(VOID)
     windowHeight = usableHeight;
     windowTop = titleBarHeight;
     
-    Printf("Workspace: Calculated windowWidth=%d, windowHeight=%d, windowTop=%d\n", 
-           windowWidth, windowHeight, windowTop);
+    Printf("Workspace: Calculated windowWidth=%ld, windowHeight=%ld, windowTop=%ld\n", 
+           (LONG)windowWidth, (LONG)windowHeight, (LONG)windowTop);
     
     /* Tile windows */
-    Printf("Workspace: Starting tile loop for %d windows\n", windowCount);
+    Printf("Workspace: Starting tile loop for %ld windows\n", (LONG)windowCount);
     
     /* Safety check - should never happen if early return worked */
     if (windowCount == 0 || windowCount > 32) {
-        Printf("Workspace: ERROR - invalid windowCount=%d, aborting tile operation\n", windowCount);
+        Printf("Workspace: ERROR - invalid windowCount=%ld, aborting tile operation\n", (LONG)windowCount);
         return;
     }
     
     for (i = 0; i < windowCount; i++) {
         /* Safety check - ensure window pointer is valid */
         if (windows[i].window == NULL) {
-            Printf("Workspace: ERROR - window[%d] is NULL, skipping\n", i);
+            Printf("Workspace: ERROR - window[%ld] is NULL, skipping\n", (LONG)i);
             continue;
         }
         
-        Printf("Workspace: Tiling window %d of %d (window=0x%lx, resizable=%s)\n", 
-               i + 1, windowCount, (ULONG)windows[i].window,
-               windows[i].isResizable ? "YES" : "NO");
+        {
+            char *resizableStr;
+            if (windows[i].isResizable) {
+                resizableStr = "YES";
+            } else {
+                resizableStr = "NO";
+            }
+            Printf("Workspace: Tiling window %ld of %ld (window=0x%lx, resizable=%s)\n", 
+                   (LONG)(i + 1), (LONG)windowCount, (ULONG)windows[i].window, resizableStr);
+        }
         windowLeft = i * windowWidth;
         
         /* For resizable windows, resize them */
         if (windows[i].isResizable) {
-            Printf("Workspace: Calling ChangeWindowBox for window %d: left=%d, top=%d, width=%d, height=%d\n",
-                   i, windowLeft, windowTop, windowWidth, windowHeight);
+            Printf("Workspace: Calling ChangeWindowBox for window %ld: left=%ld, top=%ld, width=%ld, height=%ld\n",
+                   (LONG)i, (LONG)windowLeft, (LONG)windowTop, (LONG)windowWidth, (LONG)windowHeight);
             ChangeWindowBox(windows[i].window, windowLeft, windowTop, windowWidth, windowHeight);
         } else {
             /* For fixed-size windows, just move them */
-            Printf("Workspace: Calling MoveWindow for window %d: deltaX=%d, deltaY=%d\n",
-                   i, 
-                   windowLeft - windows[i].window->LeftEdge,
-                   windowTop - windows[i].window->TopEdge);
+            Printf("Workspace: Calling MoveWindow for window %ld: deltaX=%ld, deltaY=%ld\n",
+                   (LONG)i, 
+                   (LONG)(windowLeft - windows[i].window->LeftEdge),
+                   (LONG)(windowTop - windows[i].window->TopEdge));
             MoveWindow(windows[i].window, windowLeft - windows[i].window->LeftEdge, 
                       windowTop - windows[i].window->TopEdge);
         }
-        Printf("Workspace: Finished tiling window %d\n", i);
+        Printf("Workspace: Finished tiling window %ld\n", (LONG)i);
     }
-    Printf("Workspace: Finished tiling all %d windows\n", windowCount);
+    Printf("Workspace: Finished tiling all %ld windows\n", (LONG)windowCount);
 }
 
 /* Tile windows vertically */
@@ -1771,7 +1786,7 @@ VOID TileWindowsVertically(VOID)
         return;
     }
     
-    Printf("Workspace: Tiling %d windows vertically\n", windowCount);
+    Printf("Workspace: Tiling %ld windows vertically\n", (LONG)windowCount);
     
     /* Calculate window dimensions - prevent division by zero */
     if (windowCount == 0) {
@@ -1846,7 +1861,7 @@ VOID TileWindowsGrid(VOID)
         return;
     }
     
-    Printf("Workspace: Tiling %d windows in grid\n", windowCount);
+    Printf("Workspace: Tiling %ld windows in grid\n", (LONG)windowCount);
     
     /* Calculate grid dimensions (aim for roughly square grid) */
     cols = (WORD)((windowCount + 1) / 2);  /* Roughly square */
@@ -1915,7 +1930,7 @@ VOID CascadeWindows(VOID)
         return;
     }
     
-    Printf("Workspace: Cascading %d windows\n", windowCount);
+    Printf("Workspace: Cascading %ld windows\n", (LONG)windowCount);
     
     /* Cascade windows with offset */
     for (i = 0; i < windowCount; i++) {
@@ -1976,7 +1991,7 @@ VOID MaximizeAllWindows(VOID)
         return;
     }
     
-    Printf("Workspace: Maximizing %d windows\n", windowCount);
+    Printf("Workspace: Maximizing %ld windows\n", (LONG)windowCount);
     
     windowLeft = 0;
     windowTop = titleBarHeight;
@@ -2100,10 +2115,10 @@ BOOL HandleCloseMenu(VOID)
     /* Check for visitor windows before allowing quit */
     Printf("Workspace: HandleCloseMenu called - checking for visitors...\n");
     visitorCount = CheckWorkspaceVisitors();
-    Printf("Workspace: Visitor count: %d\n", visitorCount);
+    Printf("Workspace: Visitor count: %ld\n", (LONG)visitorCount);
     if (visitorCount > 0) {
         /* Show EasyRequest dialog warning user */
-        Printf("Workspace: Visitors detected (%d windows) - showing warning dialog\n", visitorCount);
+        Printf("Workspace: Visitors detected (%ld windows) - showing warning dialog\n", (LONG)visitorCount);
         titleStr = "Cannot Exit Workspace";
         
         /* Format message with visitor count */
@@ -2529,13 +2544,13 @@ BOOL CreateShellWindow(VOID)
     
     /* Validate dimensions */
     if (screenWidth <= 0 || windowHeight <= 0 || windowTop < 0) {
-        Printf("Workspace: ERROR - Invalid dimensions for shell window (Width=%lu, Height=%d, Top=%d)\n",
-               screenWidth, windowHeight, windowTop);
+        Printf("Workspace: ERROR - Invalid dimensions for shell window (Width=%lu, Height=%ld, Top=%ld)\n",
+               screenWidth, (LONG)windowHeight, (LONG)windowTop);
         return FALSE;
     }
     
-    Printf("Workspace: Creating shell window: Left=0, Top=%d, Width=%lu, Height=%d\n",
-           windowTop, (ULONG)screenWidth, windowHeight);
+    Printf("Workspace: Creating shell window: Left=0, Top=%ld, Width=%lu, Height=%ld\n",
+           (LONG)windowTop, screenWidth, (LONG)windowHeight);
     
     /* Open shell backdrop window - positioned at bottom of screen */
     wsState.shellWindow = OpenWindowTags(NULL,
@@ -2594,13 +2609,13 @@ BOOL CreateShellConsole(VOID)
     
     /* Validate dimensions */
     if (windowWidth <= 0 || windowHeight <= 0) {
-        Printf("Workspace: ERROR - Invalid dimensions for shell console (Width=%d, Height=%d)\n",
-               windowWidth, windowHeight);
+        Printf("Workspace: ERROR - Invalid dimensions for shell console (Width=%ld, Height=%ld)\n",
+               (LONG)windowWidth, (LONG)windowHeight);
         return FALSE;
     }
     
-    Printf("Workspace: Shell console dimensions - width=%d, height=%d\n",
-           windowWidth, windowHeight);
+    Printf("Workspace: Shell console dimensions - width=%ld, height=%ld\n",
+           (LONG)windowWidth, (LONG)windowHeight);
     
     /* Build CON: device specifier using WINDOW parameter */
     /* According to RKM: WINDOW instructs the console to hijack an already open window */
