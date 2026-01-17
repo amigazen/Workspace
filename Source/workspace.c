@@ -109,7 +109,7 @@ BOOL InitializeLibraries(VOID);
 BOOL InitializeCommodity(VOID);
 VOID CleanupCommodity(VOID);
 BOOL CreateWorkspaceScreen(VOID);
-VOID CloseWorkspaceScreen(VOID);
+BOOL CloseWorkspaceScreen(VOID);
 BOOL CreateBackdropWindow(VOID);
 VOID CloseBackdropWindow(VOID);
 BOOL CreateMenuStrip(VOID);
@@ -124,9 +124,10 @@ STRPTR GetWorkspaceName(VOID);
 VOID ParseToolTypes(VOID);
 BOOL ParseCommandLine(VOID);
 VOID HandleAboutMenu(VOID);
-VOID HandleCloseMenu(VOID);
+BOOL HandleCloseMenu(VOID);  /* Returns TRUE if quit should proceed, FALSE if blocked by visitors */
 VOID HandleShellConsoleMenu(VOID);
-BOOL CheckWorkspaceVisitors(VOID);
+VOID HandleWindowsMenu(ULONG itemNumber);  /* Handle Windows menu items */
+WORD CheckWorkspaceVisitors(VOID);
 VOID HandleSetAsDefaultMenu(struct MenuItem *menuItem);
 VOID HandleDefaultPubScreenSubMenu(STRPTR screenName);
 struct NewMenu *BuildDefaultPubScreenMenu(ULONG *menuCount);
@@ -188,6 +189,7 @@ int main(int argc, char *argv[])
     struct WBStartup *wbs = NULL;
     struct DiskObject *icon = NULL;
     BOOL fromWorkbench = FALSE;
+    BOOL done = FALSE;  /* Declare at top of function for C89 compliance */
     
     Printf("Workspace: Starting application\n");
     
@@ -203,7 +205,15 @@ int main(int argc, char *argv[])
     
     /* Check if running from Workbench */
     fromWorkbench = (argc == 0);
-    Printf("Workspace: Running from Workbench: %s\n", fromWorkbench ? "YES" : "NO");
+    {
+        STRPTR workbenchStatus;
+        if (fromWorkbench) {
+            workbenchStatus = "YES";
+        } else {
+            workbenchStatus = "NO";
+        }
+        Printf("Workspace: Running from Workbench: %s\n", workbenchStatus);
+    }
     
     if (fromWorkbench) {
         wbs = (struct WBStartup *)argv;
@@ -321,19 +331,44 @@ int main(int argc, char *argv[])
     
     /* Main event loop */
     Printf("Workspace: Entering main event loop...\n");
-    Printf("Workspace: Window UserPort signal bit: %ld\n", 
-           wsState.backdropWindow ? wsState.backdropWindow->UserPort->mp_SigBit : -1);
-    Printf("Workspace: Commodity port signal bit: %ld\n",
-           wsState.commodityPort ? wsState.commodityPort->mp_SigBit : -1);
-    Printf("Workspace: Timer port signal bit: %ld\n",
-           TimerPort ? TimerPort->mp_SigBit : -1);
+    {
+        LONG windowSigBit;
+        if (wsState.backdropWindow && wsState.backdropWindow->UserPort) {
+            windowSigBit = wsState.backdropWindow->UserPort->mp_SigBit;
+        } else {
+            windowSigBit = -1;
+        }
+        Printf("Workspace: Window UserPort signal bit: %ld\n", windowSigBit);
+    }
+    {
+        LONG commoditySigBit;
+        if (wsState.commodityPort) {
+            commoditySigBit = wsState.commodityPort->mp_SigBit;
+        } else {
+            commoditySigBit = -1;
+        }
+        Printf("Workspace: Commodity port signal bit: %ld\n", commoditySigBit);
+    }
+    {
+        LONG timerSigBit;
+        if (TimerPort) {
+            timerSigBit = TimerPort->mp_SigBit;
+        } else {
+            timerSigBit = -1;
+        }
+        Printf("Workspace: Timer port signal bit: %ld\n", timerSigBit);
+    }
+    
+    event_loop_start:
     
     while (!wsState.quitFlag) {
         ULONG signals;
         ULONG windowSignal = 0;
         ULONG expectedSignals;
-        BOOL done = FALSE;
         ULONG timerSignal = 0;
+        
+        /* Reset done at start of each iteration */
+        done = FALSE;
         
         /* Wait for messages - check if backdrop window exists */
         if (wsState.backdropWindow == NULL) {
@@ -343,11 +378,21 @@ int main(int argc, char *argv[])
         }
         
         /* Check if shell window was closed by console (when shell ends) */
-        if (wsState.shellWindow != NULL && wsState.shellWindow->UserPort == NULL) {
-            /* Shell window was closed by console - shell has ended */
-            Printf("Workspace: Shell console ended - shell window was closed by console\n");
-            wsState.shellWindow = NULL;  /* Clear pointer */
-            wsState.shellEnabled = FALSE;  /* Reset shell enabled flag */
+        /* Only check if shell is actually enabled - avoid false positives during startup */
+        if (wsState.shellEnabled && wsState.shellWindow != NULL) {
+            if (wsState.shellWindow->UserPort == NULL) {
+                /* Shell window was closed by console - shell has ended */
+                Printf("Workspace: Shell console ended - shell window was closed by console\n");
+                wsState.shellWindow = NULL;  /* Clear pointer */
+                wsState.shellEnabled = FALSE;  /* Reset shell enabled flag */
+                
+                /* Re-enable "Open AmigaShell" menu item since shell is now closed */
+                /* Menu 0, Item 3, Sub 0 - format: (menu << 16) | (item << 8) | sub */
+                if (wsState.backdropWindow) {
+                    OnMenu(wsState.backdropWindow, (0UL << 16) | (3UL << 8) | 0UL);
+                    Printf("Workspace: Re-enabled 'Open AmigaShell' menu item\n");
+                }
+            }
         }
         
         /* Get window signal from UserPort */
@@ -365,10 +410,13 @@ int main(int argc, char *argv[])
         }
         
         /* Calculate expected signal mask */
-        expectedSignals = windowSignal |
-                         (wsState.commodityPort ? (1L << wsState.commodityPort->mp_SigBit) : 0) |
-                         timerSignal |
-                         SIGBREAKF_CTRL_C;
+        {
+            ULONG commoditySignal = 0;
+            if (wsState.commodityPort) {
+                commoditySignal = (1L << wsState.commodityPort->mp_SigBit);
+            }
+            expectedSignals = windowSignal | commoditySignal | timerSignal | SIGBREAKF_CTRL_C;
+        }
         
         /* If no valid signals, we can't wait - exit */
         if (expectedSignals == SIGBREAKF_CTRL_C) {
@@ -428,7 +476,11 @@ int main(int argc, char *argv[])
             struct MsgPort *userPort;
             
             /* Check if window is still valid - if UserPort is NULL, window was closed */
-            userPort = wsState.backdropWindow ? wsState.backdropWindow->UserPort : NULL;
+            if (wsState.backdropWindow) {
+                userPort = wsState.backdropWindow->UserPort;
+            } else {
+                userPort = NULL;
+            }
             if (userPort == NULL) {
                 /* Window was closed (likely by shell console) - recreate if shell was enabled */
                 Printf("Workspace: Window UserPort is NULL - window was closed\n");
@@ -518,8 +570,74 @@ int main(int argc, char *argv[])
                                                         break;
                                                     
                                                     case 2:  /* Quit */
-                                                        HandleCloseMenu();
-                                                        done = TRUE;
+                                                        /* Only set done if HandleCloseMenu allows quit */
+                                                        Printf("Workspace: Quit menu item selected - calling HandleCloseMenu()\n");
+                                                        {
+                                                            STRPTR doneStr;
+                                                            STRPTR quitFlagStr;
+                                                            if (done) {
+                                                                doneStr = "TRUE";
+                                                            } else {
+                                                                doneStr = "FALSE";
+                                                            }
+                                                            if (wsState.quitFlag) {
+                                                                quitFlagStr = "TRUE";
+                                                            } else {
+                                                                quitFlagStr = "FALSE";
+                                                            }
+                                                            Printf("Workspace: BEFORE HandleCloseMenu - done=%s, quitFlag=%s\n", 
+                                                                   doneStr, quitFlagStr);
+                                                        }
+                                                        {
+                                                            BOOL allowQuit = HandleCloseMenu();
+                                                            {
+                                                                STRPTR returnStr;
+                                                                if (allowQuit) {
+                                                                    returnStr = "TRUE";
+                                                                } else {
+                                                                    returnStr = "FALSE";
+                                                                }
+                                                                Printf("Workspace: HandleCloseMenu returned %s\n", returnStr);
+                                                            }
+                                                            if (allowQuit) {
+                                                                Printf("Workspace: Setting done=TRUE because HandleCloseMenu returned TRUE\n");
+                                                                done = TRUE;
+                                                            } else {
+                                                                Printf("Workspace: NOT setting done - HandleCloseMenu returned FALSE\n");
+                                                                {
+                                                                    STRPTR doneStr;
+                                                                    STRPTR quitFlagStr;
+                                                                    if (done) {
+                                                                        doneStr = "TRUE";
+                                                                    } else {
+                                                                        doneStr = "FALSE";
+                                                                    }
+                                                                    if (wsState.quitFlag) {
+                                                                        quitFlagStr = "TRUE";
+                                                                    } else {
+                                                                        quitFlagStr = "FALSE";
+                                                                    }
+                                                                    Printf("Workspace: done remains %s, quitFlag is %s\n", 
+                                                                           doneStr, quitFlagStr);
+                                                                }
+                                                            }
+                                                        }
+                                                        {
+                                                            STRPTR doneStr;
+                                                            STRPTR quitFlagStr;
+                                                            if (done) {
+                                                                doneStr = "TRUE";
+                                                            } else {
+                                                                doneStr = "FALSE";
+                                                            }
+                                                            if (wsState.quitFlag) {
+                                                                quitFlagStr = "TRUE";
+                                                            } else {
+                                                                quitFlagStr = "FALSE";
+                                                            }
+                                                            Printf("Workspace: AFTER HandleCloseMenu - done=%s, quitFlag=%s\n", 
+                                                                   doneStr, quitFlagStr);
+                                                        }
                                                         break;
                                                     
                                                     case 3:  /* Shell Console */
@@ -531,8 +649,11 @@ int main(int argc, char *argv[])
                                                         break;
                                                 }
                                             }
+                                        } else if (menuNumber == 1) {
+                                            /* Windows menu */
+                                            HandleWindowsMenu(itemNumber);
                                         } else {
-                                            Printf("Workspace: Menu number not 0: %lu\n", menuNumber);
+                                            Printf("Workspace: Unknown menu number: %lu\n", menuNumber);
                                         }
                                     } else {
                                         Printf("Workspace: WARNING - Menu item has no UserData\n");
@@ -545,9 +666,27 @@ int main(int argc, char *argv[])
                             }
                         }
                         ReplyMsg(msg);
+                        {
+                            STRPTR doneStr;
+                            STRPTR quitFlagStr;
+                            if (done) {
+                                doneStr = "TRUE";
+                            } else {
+                                doneStr = "FALSE";
+                            }
+                            if (wsState.quitFlag) {
+                                quitFlagStr = "TRUE";
+                            } else {
+                                quitFlagStr = "FALSE";
+                            }
+                            Printf("Workspace: After ReplyMsg for IDCMP_MENUPICK - done=%s, quitFlag=%s\n", 
+                                   doneStr, quitFlagStr);
+                        }
                         if (done) {
+                            Printf("Workspace: Breaking from message processing loop because done=TRUE\n");
                             break;
                         }
+                        Printf("Workspace: Continuing message processing loop (done=FALSE)\n");
                         break;
                     
                     default:
@@ -561,22 +700,164 @@ int main(int argc, char *argv[])
             }
         }
         
+        {
+            STRPTR doneStr;
+            STRPTR quitFlagStr;
+            if (done) {
+                doneStr = "TRUE";
+            } else {
+                doneStr = "FALSE";
+            }
+            if (wsState.quitFlag) {
+                quitFlagStr = "TRUE";
+            } else {
+                quitFlagStr = "FALSE";
+            }
+            Printf("Workspace: End of event loop iteration - done=%s, quitFlag=%s\n", 
+                   doneStr, quitFlagStr);
+        }
         if (done) {
+            Printf("Workspace: Breaking from main event loop because done=TRUE\n");
             break;
+        }
+        {
+            STRPTR quitFlagStr;
+            if (wsState.quitFlag) {
+                quitFlagStr = "TRUE";
+            } else {
+                quitFlagStr = "FALSE";
+            }
+            Printf("Workspace: Continuing main event loop (done=FALSE, quitFlag=%s)\n", 
+                   quitFlagStr);
         }
     }
     
-    /* Cleanup - order is important */
-    if (wsState.shellEnabled) {
-        CloseShellConsole();
+    {
+        STRPTR doneStr;
+        STRPTR quitFlagStr;
+        if (done) {
+            doneStr = "TRUE";
+        } else {
+            doneStr = "FALSE";
+        }
+        if (wsState.quitFlag) {
+            quitFlagStr = "TRUE";
+        } else {
+            quitFlagStr = "FALSE";
+        }
+        Printf("Workspace: Event loop exited - done=%s, quitFlag=%s\n", 
+               doneStr, quitFlagStr);
     }
     
-    FreeBackdropImage();
-    /* CloseBackdropWindow will call ClearMenuStrip, so do it before FreeMenuStrip */
-    CloseBackdropWindow();
-    /* Now free the menu structure */
-    FreeMenuStrip();
-    CloseWorkspaceScreen();
+    /* Only run cleanup if quitFlag was set (user actually wants to quit) */
+    /* If HandleCloseMenu returned FALSE due to visitors, quitFlag should be FALSE */
+    if (!wsState.quitFlag) {
+        Printf("Workspace: Event loop exited but quitFlag is FALSE - skipping cleanup\n");
+        Printf("Workspace: App will continue running\n");
+        return RETURN_OK;  /* Exit main() but don't cleanup */
+    }
+    
+    Printf("Workspace: quitFlag is TRUE - checking visitor count BEFORE closing anything\n");
+    
+    /* CRITICAL: Check visitor count FIRST, before closing the backdrop window */
+    /* Note: Backdrop window IS counted as a visitor window */
+    /* Expected: visitor count should be 1 (only backdrop window is open) */
+    {
+        WORD visitorCount = CheckWorkspaceVisitors();
+        Printf("Workspace: Visitor count: %d\n", (int)visitorCount);
+        
+        if (visitorCount == 0) {
+            /* ERROR: Should have at least the backdrop window (count = 1) */
+            Printf("Workspace: ERROR - Visitor count is 0, expected at least 1 (backdrop window)\n");
+            Printf("Workspace: Something is wrong - aborting cleanup\n");
+            wsState.quitFlag = FALSE;
+            done = FALSE;
+            goto event_loop_start;
+        } else if (visitorCount == 1) {
+            /* Perfect: Only the backdrop window is open (backdrop counts as 1 visitor) */
+            Printf("Workspace: Only backdrop window is open (count=1) - proceeding with cleanup\n");
+            
+            /* Cleanup - order is important */
+            if (wsState.shellEnabled) {
+                CloseShellConsole();
+            }
+            
+            FreeBackdropImage();
+            /* CloseBackdropWindow will call ClearMenuStrip, so do it before FreeMenuStrip */
+            CloseBackdropWindow();
+            /* Now free the menu structure */
+            FreeMenuStrip();
+            /* Close screen - should succeed since only backdrop window was open */
+            if (!CloseWorkspaceScreen()) {
+                Printf("Workspace: ERROR - CloseWorkspaceScreen failed unexpectedly\n");
+                Printf("Workspace: Cannot exit - aborting cleanup, app will continue running\n");
+                wsState.quitFlag = FALSE;
+                done = FALSE;
+                goto event_loop_start;
+            }
+            /* Cleanup successful - continue with remaining cleanup */
+        } else {
+            /* visitorCount > 1: Other windows are open (backdrop + others) - show requester and abort */
+            /* Subtract 1 for the backdrop window when showing message */
+            {
+                WORD otherWindows = visitorCount - 1;
+                Printf("Workspace: %d visitor window(s) total (1 backdrop + %d others)\n", (int)visitorCount, (int)otherWindows);
+            }
+            Printf("Workspace: Showing requester and aborting cleanup - app will continue running\n");
+            
+            /* Show requester using backdrop window (which is still open) */
+            {
+                struct EasyStruct es;
+                STRPTR titleStr = "Cannot Exit Workspace";
+                char textBuffer[256];
+                STRPTR textStr;
+                STRPTR okStr = "OK";
+                struct Window *reqWindow;
+                WORD otherWindows;
+                
+                /* Format message with visitor count (subtract 1 for backdrop window) */
+                otherWindows = visitorCount - 1;
+                if (otherWindows == 1) {
+                    SNPrintf(textBuffer, sizeof(textBuffer), 
+                             "Cannot exit Workspace.\n\nThere is 1 window open on a Workspace screen.\n\nPlease close all windows and try again.");
+                } else {
+                    SNPrintf(textBuffer, sizeof(textBuffer), 
+                             "Cannot exit Workspace.\n\nThere are %d windows open on Workspace screens.\n\nPlease close all windows and try again.", 
+                             (int)otherWindows);
+                }
+                textStr = textBuffer;
+                
+                es.es_StructSize = sizeof(struct EasyStruct);
+                es.es_Flags = 0;
+                es.es_Title = titleStr;
+                es.es_TextFormat = textStr;
+                es.es_GadgetFormat = okStr;
+                
+                /* Ensure our screen is in front */
+                if (wsState.workspaceScreen) {
+                    ScreenToFront(wsState.workspaceScreen);
+                }
+                reqWindow = wsState.backdropWindow;
+                if (reqWindow == NULL || reqWindow->WScreen != wsState.workspaceScreen) {
+                    if (wsState.workspaceScreen && wsState.workspaceScreen->FirstWindow) {
+                        reqWindow = wsState.workspaceScreen->FirstWindow;
+                    }
+                }
+                EasyRequestArgs(reqWindow, &es, NULL, NULL);
+            }
+            
+            /* Reset quitFlag and restart event loop - do NOT close anything */
+            Printf("Workspace: Resetting quitFlag - app will continue running\n");
+            wsState.quitFlag = FALSE;
+            done = FALSE;
+            /* Restart the event loop */
+            Printf("Workspace: Restarting event loop\n");
+            goto event_loop_start;
+        }
+    }
+    
+    /* If we get here, cleanup was successful (visitorCount == 1 case) */
+    /* Continue with remaining cleanup */
     CleanupCommodity();
     CleanupTimer();
     
@@ -948,8 +1229,9 @@ BOOL CreateWorkspaceScreen(VOID)
     return TRUE;
 }
 
-/* Close workspace screen - retries until CloseScreen succeeds */
-VOID CloseWorkspaceScreen(VOID)
+/* Close workspace screen - shows warning if visitors exist, then returns FALSE */
+/* Returns TRUE if screen was closed successfully, FALSE if visitors prevent closing */
+BOOL CloseWorkspaceScreen(VOID)
 {
     struct List *pubScreenList = NULL;
     struct PubScreenNode *psn = NULL;
@@ -961,11 +1243,11 @@ VOID CloseWorkspaceScreen(VOID)
     STRPTR okStr;
     
     if (!wsState.workspaceScreen) {
-        return;
+        return TRUE;  /* No screen to close - consider it successful */
     }
     
-    /* Retry loop until CloseScreen succeeds */
-    while (!closeSucceeded) {
+    /* Check for visitor windows once - don't loop */
+    {
         visitorCount = 0;
         
         /* Lock public screen list to check visitor count for all Workspace screens */
@@ -992,7 +1274,7 @@ VOID CloseWorkspaceScreen(VOID)
         if (visitorCount > 0) {
             /* Show EasyRequest dialog warning user */
             titleStr = "Cannot Exit Workspace";
-            textStr = "Cannot exit Workspace.\n\nAll windows on Workspace screens must be closed before exiting.";
+            textStr = "Cannot exit Workspace.\n\nAll windows on Workspace screens must be closed before exiting.\n\nPlease close all windows and try again.";
             okStr = "OK";
             
             es.es_StructSize = sizeof(struct EasyStruct);
@@ -1001,10 +1283,25 @@ VOID CloseWorkspaceScreen(VOID)
             es.es_TextFormat = textStr;
             es.es_GadgetFormat = okStr;
             
-            EasyRequestArgs(wsState.backdropWindow, &es, NULL, NULL);
-            Printf("Workspace: Cannot close - %d visitor windows still open, retrying...\n", (int)visitorCount);
-            /* Loop will continue and check again */
-            continue;
+            /* Ensure our screen is in front and use a valid window on our screen */
+            if (wsState.workspaceScreen) {
+                ScreenToFront(wsState.workspaceScreen);
+            }
+            /* Use backdrop window if available and valid, otherwise try to use screen's first window */
+            {
+                struct Window *reqWindow = wsState.backdropWindow;
+                /* If backdrop window is NULL or not on our screen, try to find another window */
+                if (reqWindow == NULL || reqWindow->WScreen != wsState.workspaceScreen) {
+                    /* Try to use the screen's first window if available */
+                    if (wsState.workspaceScreen && wsState.workspaceScreen->FirstWindow) {
+                        reqWindow = wsState.workspaceScreen->FirstWindow;
+                    }
+                }
+                EasyRequestArgs(reqWindow, &es, NULL, NULL);
+            }
+        Printf("Workspace: Cannot close - %d visitor windows still open, user must close them\n", (int)visitorCount);
+        /* Return FALSE - screen was not closed */
+        return FALSE;
         }
         
         /* No visitors - try to close screen */
@@ -1014,6 +1311,31 @@ VOID CloseWorkspaceScreen(VOID)
             if ((statusResult & 0x0001) == 0) {
                 /* Bit 0 = 0 means can't make private (visitors are open) */
                 Printf("Workspace: WARNING - Could not make screen private (status: 0x%04X), may have visitors\n", statusResult);
+                /* Show warning and return */
+                titleStr = "Cannot Close Screen";
+                textStr = "Cannot close Workspace screen.\n\nAll windows on this screen must be closed before exiting.\n\nPlease close all windows and try again.";
+                okStr = "OK";
+                
+                es.es_StructSize = sizeof(struct EasyStruct);
+                es.es_Flags = 0;
+                es.es_Title = titleStr;
+                es.es_TextFormat = textStr;
+                es.es_GadgetFormat = okStr;
+                
+                if (wsState.workspaceScreen) {
+                    ScreenToFront(wsState.workspaceScreen);
+                }
+                {
+                    struct Window *reqWindow = wsState.backdropWindow;
+                    if (reqWindow == NULL || reqWindow->WScreen != wsState.workspaceScreen) {
+                        if (wsState.workspaceScreen && wsState.workspaceScreen->FirstWindow) {
+                            reqWindow = wsState.workspaceScreen->FirstWindow;
+                        }
+                    }
+                    EasyRequestArgs(reqWindow, &es, NULL, NULL);
+                }
+            Printf("Workspace: Cannot make screen private, user must close windows\n");
+            return FALSE;
             } else {
                 /* Bit 0 = 1 means successfully made private */
                 Printf("Workspace: Screen made private\n");
@@ -1026,7 +1348,7 @@ VOID CloseWorkspaceScreen(VOID)
             Printf("Workspace: CloseScreen failed - windows may still be open\n");
             /* Show requester and retry */
             titleStr = "Cannot Close Screen";
-            textStr = "Cannot close Workspace screen.\n\nAll windows on this screen must be closed before exiting.";
+            textStr = "Cannot close Workspace screen.\n\nAll windows on this screen must be closed before exiting.\n\nPlease close all windows and try again.";
             okStr = "OK";
             
             es.es_StructSize = sizeof(struct EasyStruct);
@@ -1035,9 +1357,25 @@ VOID CloseWorkspaceScreen(VOID)
             es.es_TextFormat = textStr;
             es.es_GadgetFormat = okStr;
             
-            EasyRequestArgs(wsState.backdropWindow, &es, NULL, NULL);
-            Printf("Workspace: CloseScreen failed, retrying...\n");
-            /* Loop will continue and retry */
+            /* Ensure our screen is in front and use a valid window on our screen */
+            if (wsState.workspaceScreen) {
+                ScreenToFront(wsState.workspaceScreen);
+            }
+            /* Use backdrop window if available and valid, otherwise try to use screen's first window */
+            {
+                struct Window *reqWindow = wsState.backdropWindow;
+                /* If backdrop window is NULL or not on our screen, try to find another window */
+                if (reqWindow == NULL || reqWindow->WScreen != wsState.workspaceScreen) {
+                    /* Try to use the screen's first window if available */
+                    if (wsState.workspaceScreen && wsState.workspaceScreen->FirstWindow) {
+                        reqWindow = wsState.workspaceScreen->FirstWindow;
+                    }
+                }
+                EasyRequestArgs(reqWindow, &es, NULL, NULL);
+            }
+            Printf("Workspace: CloseScreen failed, user must close windows\n");
+            /* Return FALSE - screen was not closed */
+            return FALSE;
         }
     }
     
@@ -1049,6 +1387,7 @@ VOID CloseWorkspaceScreen(VOID)
     
     wsState.workspaceScreen = NULL;
     Printf("Workspace: Screen closed successfully\n");
+    return TRUE;
 }
 
 /* Create backdrop window using standard Intuition OpenWindowTags() */
@@ -1132,9 +1471,16 @@ BOOL CreateBackdropWindow(VOID)
         wsState.backdropWindow = NULL;
         return FALSE;
     }
-    Printf("Workspace: Window UserPort: 0x%08lX, Signal bit: %ld\n", 
-           (ULONG)wsState.backdropWindow->UserPort,
-           wsState.backdropWindow->UserPort ? wsState.backdropWindow->UserPort->mp_SigBit : -1);
+    {
+        LONG signalBit;
+        if (wsState.backdropWindow && wsState.backdropWindow->UserPort) {
+            signalBit = wsState.backdropWindow->UserPort->mp_SigBit;
+        } else {
+            signalBit = -1;
+        }
+        Printf("Workspace: Window UserPort: 0x%08lX, Signal bit: %ld\n", 
+               (ULONG)wsState.backdropWindow->UserPort, signalBit);
+    }
     
     /* Window is now open - menu will be created separately after this function returns */
     
@@ -1158,7 +1504,497 @@ VOID CloseBackdropWindow(VOID)
 /* Menu item handlers */
 VOID HandleAboutMenu(VOID)
 {
-    /* TODO: Show about requester */
+    struct EasyStruct es;
+    STRPTR titleStr = "About Workspace";
+    STRPTR textStr = "Workspace\n\nA public screen manager for AmigaOS\n\nVersion 1.0";
+    STRPTR okStr = "OK";
+    struct Window *reqWindow;
+    
+    es.es_StructSize = sizeof(struct EasyStruct);
+    es.es_Flags = 0;
+    es.es_Title = titleStr;
+    es.es_TextFormat = textStr;
+    es.es_GadgetFormat = okStr;
+    
+    /* Ensure our screen is in front */
+    if (wsState.workspaceScreen) {
+        ScreenToFront(wsState.workspaceScreen);
+    }
+    
+    /* Use backdrop window if available and valid, otherwise try to use screen's first window */
+    reqWindow = wsState.backdropWindow;
+    if (reqWindow == NULL || reqWindow->WScreen != wsState.workspaceScreen) {
+        if (wsState.workspaceScreen && wsState.workspaceScreen->FirstWindow) {
+            reqWindow = wsState.workspaceScreen->FirstWindow;
+        }
+    }
+    
+    EasyRequestArgs(reqWindow, &es, NULL, NULL);
+}
+
+/* Structure to hold window information for tiling */
+struct WindowInfo {
+    struct Window *window;
+    WORD minWidth;
+    WORD minHeight;
+    WORD maxWidth;
+    WORD maxHeight;
+    BOOL isResizable;
+    BOOL isShellWindow;
+};
+
+/* Get all visitor windows on the workspace screen */
+/* Returns number of windows found, stores pointers in windows array */
+/* Excludes backdrop window and shell window if specified */
+WORD GetVisitorWindows(struct WindowInfo *windows, WORD maxWindows, BOOL excludeShell)
+{
+    struct Window *win;
+    WORD count = 0;
+    WORD titleBarHeight;
+    
+    if (!wsState.workspaceScreen || !windows || maxWindows == 0) {
+        return 0;
+    }
+    
+    /* Get title bar height for screen */
+    titleBarHeight = wsState.workspaceScreen->BarHeight + 1;
+    
+    /* Iterate through all windows on the screen */
+    win = wsState.workspaceScreen->FirstWindow;
+    Printf("Workspace: GetVisitorWindows - backdropWindow=0x%08lX, shellWindow=0x%08lX\n",
+           (ULONG)wsState.backdropWindow, (ULONG)wsState.shellWindow);
+    while (win != NULL && count < maxWindows) {
+        Printf("Workspace: GetVisitorWindows - checking window 0x%08lX\n", (ULONG)win);
+        
+        /* ALWAYS skip backdrop window - it's our own window, never tile it */
+        if (win == wsState.backdropWindow) {
+            Printf("Workspace: GetVisitorWindows - skipping backdrop window\n");
+            win = win->NextWindow;
+            continue;
+        }
+        
+        /* ALWAYS skip shell window - it's our own window, never tile it */
+        /* Check both by pointer and by checking if it's a backdrop window at the bottom */
+        if (win == wsState.shellWindow) {
+            Printf("Workspace: GetVisitorWindows - skipping shell window (by pointer match)\n");
+            win = win->NextWindow;
+            continue;
+        }
+        
+        /* Also check if this window matches shell window characteristics:
+         * - Backdrop window
+         * - Borderless
+         * - At bottom of screen (TopEdge near screen height - 200)
+         * - Height is approximately 200
+         * This works even if wsState.shellWindow is NULL (after shell ends)
+         */
+        if ((win->Flags & WFLG_BACKDROP) != 0 &&
+            (win->Flags & WFLG_BORDERLESS) != 0 &&
+            win->WScreen == wsState.workspaceScreen) {
+            WORD expectedTop = wsState.workspaceScreen->Height - 200;
+            WORD expectedHeight = 200;
+            /* Check if window is at bottom of screen with ~200px height */
+            /* Use a wider tolerance for TopEdge since it might vary slightly */
+            if (win->TopEdge >= expectedTop - 20 && win->TopEdge <= expectedTop + 20 &&
+                win->Height >= expectedHeight - 20 && win->Height <= expectedHeight + 20) {
+                Printf("Workspace: GetVisitorWindows - skipping shell window (by characteristics: TopEdge=%d, Height=%d, expected Top=%d, Height=%d)\n",
+                       (int)win->TopEdge, (int)win->Height, (int)expectedTop, (int)expectedHeight);
+                win = win->NextWindow;
+                continue;
+            }
+        }
+        
+        /* Store window info */
+        windows[count].window = win;
+        windows[count].isShellWindow = FALSE;  /* We've already excluded shell window above */
+        Printf("Workspace: GetVisitorWindows - including window 0x%08lX in tiling list\n", (ULONG)win);
+        
+        /* Check if window is resizable */
+        /* Windows with WFLG_SIZEGADGET or WFLG_DRAGBAR are typically resizable */
+        windows[count].isResizable = ((win->Flags & WFLG_SIZEGADGET) != 0);
+        
+        /* Get window size limits if available */
+        /* For now, use reasonable defaults */
+        windows[count].minWidth = 64;
+        windows[count].minHeight = 32;
+        windows[count].maxWidth = win->WScreen->Width;
+        windows[count].maxHeight = win->WScreen->Height - titleBarHeight;
+        
+        count++;
+        win = win->NextWindow;
+    }
+    
+    return count;
+}
+
+/* Tile windows horizontally */
+VOID TileWindowsHorizontally(VOID)
+{
+    struct WindowInfo windows[32];
+    WORD windowCount;
+    WORD i;
+    WORD screenWidth;
+    WORD screenHeight;
+    WORD titleBarHeight;
+    WORD windowWidth;
+    WORD windowHeight;
+    WORD windowTop;
+    WORD windowLeft;
+    WORD shellHeight = 0;
+    WORD usableHeight;
+    
+    if (!wsState.workspaceScreen) {
+        return;
+    }
+    
+    /* Get screen dimensions */
+    screenWidth = wsState.workspaceScreen->Width;
+    screenHeight = wsState.workspaceScreen->Height;
+    titleBarHeight = wsState.workspaceScreen->BarHeight + 1;
+    
+    /* Account for shell window at bottom if open */
+    if (wsState.shellWindow && wsState.shellEnabled) {
+        shellHeight = 200;  /* Shell window height */
+    }
+    
+    usableHeight = screenHeight - titleBarHeight - shellHeight;
+    
+    /* Get all visitor windows (excluding backdrop, excluding shell) */
+    Printf("Workspace: Getting visitor windows...\n");
+    windowCount = GetVisitorWindows(windows, 32, TRUE);
+    Printf("Workspace: GetVisitorWindows returned %d windows\n", (int)windowCount);
+    
+    if (windowCount == 0) {
+        Printf("Workspace: No windows to tile - returning early\n");
+        return;
+    }
+    
+    Printf("Workspace: Tiling %d windows horizontally\n", (int)windowCount);
+    
+    /* Calculate window dimensions - prevent division by zero */
+    if (windowCount == 0) {
+        Printf("Workspace: ERROR - windowCount is 0, returning early\n");
+        return;
+    }
+    
+    windowWidth = screenWidth / windowCount;
+    if (windowWidth == 0) {
+        Printf("Workspace: ERROR - calculated windowWidth is 0, returning early\n");
+        return;
+    }
+    windowHeight = usableHeight;
+    windowTop = titleBarHeight;
+    
+    Printf("Workspace: Calculated windowWidth=%d, windowHeight=%d, windowTop=%d\n", 
+           (int)windowWidth, (int)windowHeight, (int)windowTop);
+    
+    /* Tile windows */
+    Printf("Workspace: Starting tile loop for %d windows\n", (int)windowCount);
+    for (i = 0; i < windowCount; i++) {
+        Printf("Workspace: Tiling window %d of %d\n", (int)(i + 1), (int)windowCount);
+        windowLeft = i * windowWidth;
+        
+        /* For resizable windows, resize them */
+        if (windows[i].isResizable) {
+            ChangeWindowBox(windows[i].window, windowLeft, windowTop, windowWidth, windowHeight);
+        } else {
+            /* For fixed-size windows, just move them */
+            MoveWindow(windows[i].window, windowLeft - windows[i].window->LeftEdge, 
+                      windowTop - windows[i].window->TopEdge);
+        }
+    }
+}
+
+/* Tile windows vertically */
+VOID TileWindowsVertically(VOID)
+{
+    struct WindowInfo windows[32];
+    WORD windowCount;
+    WORD i;
+    WORD screenWidth;
+    WORD screenHeight;
+    WORD titleBarHeight;
+    WORD windowWidth;
+    WORD windowHeight;
+    WORD windowTop;
+    WORD windowLeft;
+    WORD shellHeight = 0;
+    WORD usableHeight;
+    
+    if (!wsState.workspaceScreen) {
+        return;
+    }
+    
+    /* Get screen dimensions */
+    screenWidth = wsState.workspaceScreen->Width;
+    screenHeight = wsState.workspaceScreen->Height;
+    titleBarHeight = wsState.workspaceScreen->BarHeight + 1;
+    
+    /* Account for shell window at bottom if open */
+    if (wsState.shellWindow && wsState.shellEnabled) {
+        shellHeight = 200;  /* Shell window height */
+    }
+    
+    usableHeight = screenHeight - titleBarHeight - shellHeight;
+    
+    /* Get all visitor windows (excluding backdrop, excluding shell) */
+    windowCount = GetVisitorWindows(windows, 32, TRUE);
+    
+    if (windowCount == 0) {
+        Printf("Workspace: No windows to tile\n");
+        return;
+    }
+    
+    Printf("Workspace: Tiling %d windows vertically\n", (int)windowCount);
+    
+    /* Calculate window dimensions - prevent division by zero */
+    if (windowCount == 0) {
+        Printf("Workspace: ERROR - windowCount is 0, returning early\n");
+        return;
+    }
+    
+    windowWidth = screenWidth;
+    windowHeight = usableHeight / windowCount;
+    if (windowHeight == 0) {
+        Printf("Workspace: ERROR - calculated windowHeight is 0, returning early\n");
+        return;
+    }
+    windowLeft = 0;
+    
+    /* Tile windows */
+    for (i = 0; i < windowCount; i++) {
+        windowTop = titleBarHeight + (i * windowHeight);
+        
+        /* For resizable windows, resize them */
+        if (windows[i].isResizable) {
+            ChangeWindowBox(windows[i].window, windowLeft, windowTop, windowWidth, windowHeight);
+        } else {
+            /* For fixed-size windows, just move them */
+            MoveWindow(windows[i].window, windowLeft - windows[i].window->LeftEdge, 
+                      windowTop - windows[i].window->TopEdge);
+        }
+    }
+}
+
+/* Tile windows in a grid layout */
+VOID TileWindowsGrid(VOID)
+{
+    struct WindowInfo windows[32];
+    WORD windowCount;
+    WORD i;
+    WORD screenWidth;
+    WORD screenHeight;
+    WORD titleBarHeight;
+    WORD windowWidth;
+    WORD windowHeight;
+    WORD windowTop;
+    WORD windowLeft;
+    WORD shellHeight = 0;
+    WORD usableHeight;
+    WORD cols;
+    WORD rows;
+    WORD col;
+    WORD row;
+    
+    if (!wsState.workspaceScreen) {
+        return;
+    }
+    
+    /* Get screen dimensions */
+    screenWidth = wsState.workspaceScreen->Width;
+    screenHeight = wsState.workspaceScreen->Height;
+    titleBarHeight = wsState.workspaceScreen->BarHeight + 1;
+    
+    /* Account for shell window at bottom if open */
+    if (wsState.shellWindow && wsState.shellEnabled) {
+        shellHeight = 200;  /* Shell window height */
+    }
+    
+    usableHeight = screenHeight - titleBarHeight - shellHeight;
+    
+    /* Get all visitor windows (excluding backdrop, excluding shell) */
+    windowCount = GetVisitorWindows(windows, 32, TRUE);
+    
+    if (windowCount == 0) {
+        Printf("Workspace: No windows to tile\n");
+        return;
+    }
+    
+    Printf("Workspace: Tiling %d windows in grid\n", (int)windowCount);
+    
+    /* Calculate grid dimensions (aim for roughly square grid) */
+    cols = (WORD)((windowCount + 1) / 2);  /* Roughly square */
+    if (cols == 0) cols = 1;
+    rows = (windowCount + cols - 1) / cols;  /* Ceiling division */
+    if (rows == 0) rows = 1;
+    
+    windowWidth = screenWidth / cols;
+    windowHeight = usableHeight / rows;
+    
+    /* Tile windows in grid */
+    for (i = 0; i < windowCount; i++) {
+        row = i / cols;
+        col = i % cols;
+        
+        windowLeft = col * windowWidth;
+        windowTop = titleBarHeight + (row * windowHeight);
+        
+        /* For resizable windows, resize them */
+        if (windows[i].isResizable) {
+            ChangeWindowBox(windows[i].window, windowLeft, windowTop, windowWidth, windowHeight);
+        } else {
+            /* For fixed-size windows, just move them */
+            MoveWindow(windows[i].window, windowLeft - windows[i].window->LeftEdge, 
+                      windowTop - windows[i].window->TopEdge);
+        }
+    }
+}
+
+/* Cascade windows */
+VOID CascadeWindows(VOID)
+{
+    struct WindowInfo windows[32];
+    WORD windowCount;
+    WORD i;
+    WORD screenWidth;
+    WORD screenHeight;
+    WORD titleBarHeight;
+    WORD windowTop;
+    WORD windowLeft;
+    WORD shellHeight = 0;
+    WORD usableHeight;
+    WORD cascadeOffset = 30;  /* Offset for cascade effect */
+    
+    if (!wsState.workspaceScreen) {
+        return;
+    }
+    
+    /* Get screen dimensions */
+    screenWidth = wsState.workspaceScreen->Width;
+    screenHeight = wsState.workspaceScreen->Height;
+    titleBarHeight = wsState.workspaceScreen->BarHeight + 1;
+    
+    /* Account for shell window at bottom if open */
+    if (wsState.shellWindow && wsState.shellEnabled) {
+        shellHeight = 200;  /* Shell window height */
+    }
+    
+    usableHeight = screenHeight - titleBarHeight - shellHeight;
+    
+    /* Get all visitor windows (excluding backdrop, excluding shell) */
+    windowCount = GetVisitorWindows(windows, 32, TRUE);
+    
+    if (windowCount == 0) {
+        Printf("Workspace: No windows to cascade\n");
+        return;
+    }
+    
+    Printf("Workspace: Cascading %d windows\n", (int)windowCount);
+    
+    /* Cascade windows with offset */
+    for (i = 0; i < windowCount; i++) {
+        windowLeft = i * cascadeOffset;
+        windowTop = titleBarHeight + (i * cascadeOffset);
+        
+        /* Make sure windows don't go off screen */
+        if (windowLeft + windows[i].window->Width > screenWidth) {
+            windowLeft = screenWidth - windows[i].window->Width;
+        }
+        if (windowTop + windows[i].window->Height > screenHeight - shellHeight) {
+            windowTop = screenHeight - shellHeight - windows[i].window->Height;
+        }
+        
+        /* Move window to cascade position */
+        MoveWindow(windows[i].window, windowLeft - windows[i].window->LeftEdge, 
+                  windowTop - windows[i].window->TopEdge);
+    }
+}
+
+/* Maximize all windows */
+VOID MaximizeAllWindows(VOID)
+{
+    struct WindowInfo windows[32];
+    WORD windowCount;
+    WORD i;
+    WORD screenWidth;
+    WORD screenHeight;
+    WORD titleBarHeight;
+    WORD windowTop;
+    WORD windowLeft;
+    WORD windowWidth;
+    WORD windowHeight;
+    WORD shellHeight = 0;
+    WORD usableHeight;
+    
+    if (!wsState.workspaceScreen) {
+        return;
+    }
+    
+    /* Get screen dimensions */
+    screenWidth = wsState.workspaceScreen->Width;
+    screenHeight = wsState.workspaceScreen->Height;
+    titleBarHeight = wsState.workspaceScreen->BarHeight + 1;
+    
+    /* Account for shell window at bottom if open */
+    if (wsState.shellWindow && wsState.shellEnabled) {
+        shellHeight = 200;  /* Shell window height */
+    }
+    
+    usableHeight = screenHeight - titleBarHeight - shellHeight;
+    
+    /* Get all visitor windows (excluding backdrop, excluding shell) */
+    windowCount = GetVisitorWindows(windows, 32, TRUE);
+    
+    if (windowCount == 0) {
+        Printf("Workspace: No windows to maximize\n");
+        return;
+    }
+    
+    Printf("Workspace: Maximizing %d windows\n", (int)windowCount);
+    
+    windowLeft = 0;
+    windowTop = titleBarHeight;
+    windowWidth = screenWidth;
+    windowHeight = usableHeight;
+    
+    /* Maximize all resizable windows */
+    for (i = 0; i < windowCount; i++) {
+        if (windows[i].isResizable) {
+            ChangeWindowBox(windows[i].window, windowLeft, windowTop, windowWidth, windowHeight);
+        }
+    }
+}
+
+/* Handle Windows menu items */
+VOID HandleWindowsMenu(ULONG itemNumber)
+{
+    Printf("Workspace: HandleWindowsMenu called with itemNumber=%lu\n", itemNumber);
+    
+    switch (itemNumber) {
+        case 0:  /* Tile Horizontally */
+            Printf("Workspace: Calling TileWindowsHorizontally\n");
+            TileWindowsHorizontally();
+            Printf("Workspace: TileWindowsHorizontally returned\n");
+            break;
+        
+        case 1:  /* Tile Vertically */
+            Printf("Workspace: Calling TileWindowsVertically\n");
+            TileWindowsVertically();
+            Printf("Workspace: TileWindowsVertically returned\n");
+            break;
+        
+        case 2:  /* Grid Layout */
+            Printf("Workspace: Calling TileWindowsGrid\n");
+            TileWindowsGrid();
+            Printf("Workspace: TileWindowsGrid returned\n");
+            break;
+        
+        default:
+            Printf("Workspace: Unknown Windows menu item: %lu\n", itemNumber);
+            break;
+    }
+    
+    Printf("Workspace: HandleWindowsMenu returning\n");
 }
 
 VOID HandleShellConsoleMenu(VOID)
@@ -1187,7 +2023,10 @@ VOID HandleShellConsoleMenu(VOID)
 }
 
 /* Check visitor count for all Workspace screens (not Workbench) */
-BOOL CheckWorkspaceVisitors(VOID)
+/* Returns the number of visitor windows (0 if none, or if error) */
+/* Note: Backdrop window IS counted as a visitor window */
+/* psn_VisitorCount only counts windows from other processes, so we add 1 for backdrop */
+WORD CheckWorkspaceVisitors(VOID)
 {
     struct List *pubScreenList = NULL;
     struct PubScreenNode *psn = NULL;
@@ -1197,7 +2036,7 @@ BOOL CheckWorkspaceVisitors(VOID)
     pubScreenList = LockPubScreenList();
     if (!pubScreenList) {
         Printf("Workspace: WARNING - Could not lock public screen list\n");
-        return FALSE; /* Assume no visitors if we can't check */
+        return 0; /* Return 0 if we can't check */
     }
     
     /* Iterate through all public screens - correct Exec list iteration */
@@ -1207,31 +2046,51 @@ BOOL CheckWorkspaceVisitors(VOID)
         if (psn->psn_Node.ln_Name && 
             strncmp(psn->psn_Node.ln_Name, "Workspace.", 10) == 0) {
             totalVisitors += (WORD)psn->psn_VisitorCount;
-            Printf("Workspace: Screen '%s' has %d visitor windows\n", 
-                   psn->psn_Node.ln_Name, (int)psn->psn_VisitorCount);
         }
         psn = (struct PubScreenNode *)psn->psn_Node.ln_Succ;
     }
     
     UnlockPubScreenList();
     
-    Printf("Workspace: Total visitor windows on all Workspace screens: %d\n", (int)totalVisitors);
-    if (totalVisitors > 0) {
-        return TRUE;
-    } else {
-        return FALSE;
+    /* Add 1 for the backdrop window (owner's window, not counted in psn_VisitorCount) */
+    if (wsState.backdropWindow != NULL) {
+        totalVisitors += 1;
     }
+    
+    /* Don't log here - let caller log with context */
+    return totalVisitors;
 }
 
-VOID HandleCloseMenu(VOID)
+BOOL HandleCloseMenu(VOID)
 {
+    struct EasyStruct es;
+    STRPTR titleStr;
+    STRPTR textStr;
+    STRPTR okStr;
+    struct Window *reqWindow;
+    WORD visitorCount;
+    char textBuffer[256];
+    
     /* Check for visitor windows before allowing quit */
-    if (CheckWorkspaceVisitors()) {
+    Printf("Workspace: HandleCloseMenu called - checking for visitors...\n");
+    visitorCount = CheckWorkspaceVisitors();
+    Printf("Workspace: Visitor count: %d\n", (int)visitorCount);
+    if (visitorCount > 0) {
         /* Show EasyRequest dialog warning user */
-        struct EasyStruct es;
-        STRPTR titleStr = "Cannot Exit Workspace";
-        STRPTR textStr = "Cannot exit Workspace.\n\nAll windows on Workspace screens must be closed before exiting.";
-        STRPTR okStr = "OK";
+        Printf("Workspace: Visitors detected (%d windows) - showing warning dialog\n", (int)visitorCount);
+        titleStr = "Cannot Exit Workspace";
+        
+        /* Format message with visitor count */
+        if (visitorCount == 1) {
+            SNPrintf(textBuffer, sizeof(textBuffer), 
+                     "Cannot exit Workspace.\n\nThere is 1 window open on a Workspace screen.\n\nPlease close all windows and try again.");
+        } else {
+            SNPrintf(textBuffer, sizeof(textBuffer), 
+                     "Cannot exit Workspace.\n\nThere are %d windows open on Workspace screens.\n\nPlease close all windows and try again.", 
+                     (int)visitorCount);
+        }
+        textStr = textBuffer;
+        okStr = "OK";
         
         es.es_StructSize = sizeof(struct EasyStruct);
         es.es_Flags = 0;
@@ -1239,13 +2098,36 @@ VOID HandleCloseMenu(VOID)
         es.es_TextFormat = textStr;
         es.es_GadgetFormat = okStr;
         
-        EasyRequestArgs(wsState.backdropWindow, &es, NULL, NULL);
-        Printf("Workspace: Quit prevented - visitor windows still open\n");
-        return; /* Don't set quitFlag - prevent cleanup */
+        /* Ensure our screen is in front and use a valid window on our screen */
+        if (wsState.workspaceScreen) {
+            ScreenToFront(wsState.workspaceScreen);
+        }
+        reqWindow = wsState.backdropWindow;
+        if (reqWindow == NULL || reqWindow->WScreen != wsState.workspaceScreen) {
+            if (wsState.workspaceScreen && wsState.workspaceScreen->FirstWindow) {
+                reqWindow = wsState.workspaceScreen->FirstWindow;
+            }
+        }
+        EasyRequestArgs(reqWindow, &es, NULL, NULL);
+        Printf("Workspace: User dismissed dialog - NOT setting quitFlag, NOT exiting\n");
+        {
+            STRPTR quitFlagStr;
+            if (wsState.quitFlag) {
+                quitFlagStr = "TRUE";
+            } else {
+                quitFlagStr = "FALSE";
+            }
+            Printf("Workspace: quitFlag is currently: %s\n", quitFlagStr);
+        }
+        /* CRITICAL: Do NOT set quitFlag - this prevents the event loop from exiting */
+        /* Do NOT proceed with cleanup - just return FALSE and let event loop continue */
+        return FALSE;
     }
     
     /* No visitors - safe to quit */
+    Printf("Workspace: No visitors detected - setting quitFlag to exit\n");
     wsState.quitFlag = TRUE;
+    return TRUE;
 }
 
 VOID HandleDefaultPubScreenSubMenu(STRPTR screenName)
@@ -1294,6 +2176,10 @@ struct NewMenu *BuildDefaultPubScreenMenu(ULONG *menuCount)
     /* Add "Default PubScreen" menu item */
     newMenu[idx].nm_Type = NM_ITEM;
     newMenu[idx].nm_Label = "Default PubScreen";
+    newMenu[idx].nm_CommKey = NULL;
+    newMenu[idx].nm_Flags = 0;
+    newMenu[idx].nm_MutualExclude = 0;
+    newMenu[idx].nm_UserData = NULL;
     idx++;
     
     /* Add "Workbench" as first sub-item (corresponds to NULL) */
@@ -1404,6 +2290,7 @@ struct NewMenu *BuildDefaultPubScreenMenu(ULONG *menuCount)
     /* Add "About" - this is a regular menu item, not a sub-item */
     newMenu[idx].nm_Type = NM_ITEM;
     newMenu[idx].nm_Label = "About";
+    newMenu[idx].nm_CommKey = "?";
     newMenu[idx].nm_UserData = (APTR)((0UL << 16) | (1UL << 8) | 0UL); /* Menu 0, Item 1, Sub 0 */
     idx++;
     
@@ -1416,16 +2303,67 @@ struct NewMenu *BuildDefaultPubScreenMenu(ULONG *menuCount)
     
     /* Add "Quit" - this is a regular menu item, not a sub-item */
     newMenu[idx].nm_Type = NM_ITEM;
-    newMenu[idx].nm_Label = "Quit";
+    newMenu[idx].nm_Label = "Close Workspace";
     newMenu[idx].nm_CommKey = "Q";
     newMenu[idx].nm_UserData = (APTR)((0UL << 16) | (2UL << 8) | 0UL); /* Menu 0, Item 2, Sub 0 */
     idx++;
     
-    /* Terminate menu */
-    newMenu[idx].nm_Type = NM_END;
+    /* Ensure we have enough space for second menu (need ~10 more entries) */
+    if (idx >= maxCount + 5) {
+        /* Need more space - reallocate */
+        maxCount *= 2;
+        newMenu2 = AllocMem(sizeof(struct NewMenu) * (maxCount + 10), MEMF_CLEAR);
+        if (!newMenu2) {
+            Printf("Workspace: ERROR - Failed to reallocate menu array for second menu\n");
+            FreeMem(newMenu, sizeof(struct NewMenu) * (maxCount / 2 + 10));
+            return NULL;
+        }
+        CopyMem(newMenu, newMenu2, sizeof(struct NewMenu) * idx);
+        FreeMem(newMenu, sizeof(struct NewMenu) * (maxCount / 2 + 10));
+        newMenu = newMenu2;
+    }
     
-    *menuCount = idx;
-    Printf("Workspace: Built menu with %lu items (%lu Workspace screens)\n", idx, count);
+    /* Start second menu - Windows (NO NM_END between menus!) */
+    newMenu[idx].nm_Type = NM_TITLE;
+    newMenu[idx].nm_Label = "Windows";
+    newMenu[idx].nm_CommKey = NULL;
+    newMenu[idx].nm_Flags = 0;
+    newMenu[idx].nm_MutualExclude = 0;
+    newMenu[idx].nm_UserData = NULL;
+    idx++;
+    
+    /* Add "Tile Horizontally" */
+    newMenu[idx].nm_Type = NM_ITEM;
+    newMenu[idx].nm_Label = "Tile Horizontally";
+    newMenu[idx].nm_CommKey = "H";
+    newMenu[idx].nm_UserData = (APTR)((1UL << 16) | (0UL << 8) | 0UL); /* Menu 1, Item 0, Sub 0 */
+    idx++;
+    
+    /* Add "Tile Vertically" */
+    newMenu[idx].nm_Type = NM_ITEM;
+    newMenu[idx].nm_Label = "Tile Vertically";
+    newMenu[idx].nm_CommKey = "V";
+    newMenu[idx].nm_UserData = (APTR)((1UL << 16) | (1UL << 8) | 0UL); /* Menu 1, Item 1, Sub 0 */
+    idx++;
+    
+    /* Add "Grid Layout" */
+    newMenu[idx].nm_Type = NM_ITEM;
+    newMenu[idx].nm_Label = "Grid Layout";
+    newMenu[idx].nm_CommKey = "G";
+    newMenu[idx].nm_UserData = (APTR)((1UL << 16) | (2UL << 8) | 0UL); /* Menu 1, Item 2, Sub 0 */
+    idx++;
+    
+    /* Terminate second menu (this also terminates the entire menu strip) */
+    newMenu[idx].nm_Type = NM_END;
+    newMenu[idx].nm_Label = NULL;
+    newMenu[idx].nm_CommKey = NULL;
+    newMenu[idx].nm_Flags = 0;
+    newMenu[idx].nm_MutualExclude = 0;
+    newMenu[idx].nm_UserData = NULL;
+    idx++;
+    
+    *menuCount = idx;  /* Count includes final NM_END entry */
+    Printf("Workspace: Built menu with %lu items (%lu Workspace screens, 2 menus)\n", *menuCount, count);
     return newMenu;
 }
 
@@ -1571,7 +2509,7 @@ BOOL CreateShellWindow(VOID)
     }
     
     Printf("Workspace: Creating shell window: Left=0, Top=%d, Width=%lu, Height=%d\n",
-           windowTop, screenWidth, windowHeight);
+           windowTop, (ULONG)screenWidth, windowHeight);
     
     /* Open shell backdrop window - positioned at bottom of screen */
     wsState.shellWindow = OpenWindowTags(NULL,
@@ -1721,8 +2659,28 @@ BOOL CreateShellConsole(VOID)
         /* Note: cmdStream will be closed by System() when shell terminates */
     }
     
+    /* SystemTagList returns process ID on success (non-zero) or 0 on failure */
+    /* However, with SYS_Asynch, it may return immediately before process starts */
     if (result == 0) {
-        Printf("Workspace: ERROR - Failed to create shell console (System returned 0)\n");
+        Printf("Workspace: WARNING - SystemTagList returned 0 (may be normal with async)\n");
+        /* Don't fail immediately - check if window was actually donated */
+        /* If window UserPort becomes NULL, it was successfully donated */
+        if (wsState.shellWindow && wsState.shellWindow->UserPort == NULL) {
+            Printf("Workspace: Window was donated to console despite return value 0\n");
+            /* Success - window was donated */
+        } else {
+            Printf("Workspace: ERROR - Failed to create shell console (System returned 0 and window not donated)\n");
+            return FALSE;
+        }
+    } else {
+        Printf("Workspace: SystemTagList returned process ID: %ld\n", result);
+    }
+    
+    /* Verify window was actually donated (UserPort should be NULL) */
+    /* Small delay to let console take ownership */
+    Delay(1);
+    if (wsState.shellWindow && wsState.shellWindow->UserPort != NULL) {
+        Printf("Workspace: WARNING - Window was not donated to console\n");
         return FALSE;
     }
     
@@ -1731,6 +2689,14 @@ BOOL CreateShellConsole(VOID)
     /* Don't set shellWindow to NULL - we'll detect when it's closed by checking UserPort */
     Printf("Workspace: Shell console launched successfully - shell window ownership transferred to console\n");
     Printf("Workspace: Note - when shell ends, console will close the shell window\n");
+    
+    /* Disable "Open AmigaShell" menu item since shell is now open */
+    /* Menu 0, Item 3, Sub 0 - format: (menu << 16) | (item << 8) | sub */
+    if (wsState.backdropWindow) {
+        OffMenu(wsState.backdropWindow, (0UL << 16) | (3UL << 8) | 0UL);
+        Printf("Workspace: Disabled 'Open AmigaShell' menu item\n");
+    }
+    
     Printf("Workspace: Shell console created successfully\n");
     return TRUE;
 }
@@ -1754,6 +2720,14 @@ VOID CloseShellConsole(VOID)
     }
     
     wsState.shellEnabled = FALSE;
+    
+    /* Re-enable "Open AmigaShell" menu item since shell is now closed */
+    /* Menu 0, Item 3, Sub 0 - format: (menu << 16) | (item << 8) | sub */
+    if (wsState.backdropWindow) {
+        OnMenu(wsState.backdropWindow, (0UL << 16) | (3UL << 8) | 0UL);
+        Printf("Workspace: Re-enabled 'Open AmigaShell' menu item\n");
+    }
+    
     Printf("Workspace: Shell console cleanup complete\n");
 }
 
@@ -2116,7 +3090,8 @@ VOID ProcessCommodityMessages(VOID)
                 case CXCMD_KILL:
                     /* Quit application - check visitors first */
                     Printf("Workspace: Received CXCMD_KILL\n");
-                    HandleCloseMenu(); /* This will check visitors and show dialog if needed */
+                    /* HandleCloseMenu will check visitors and only set quitFlag if allowed */
+                    HandleCloseMenu();
                     break;
                 
                 case CXCMD_UNIQUE:
