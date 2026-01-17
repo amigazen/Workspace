@@ -528,12 +528,12 @@ int main(int argc, char *argv[])
                             struct MenuItem *item;
                             UWORD menuCode = imsg->Code;
                             
-                            Printf("Workspace: IDCMP_MENUPICK received, menuCode=0x%04X\n", menuCode);
+                            Printf("Workspace: IDCMP_MENUPICK received, menuCode=0x%x\n", menuCode);
                             
                             while (menuCode != MENUNULL) {
                                 item = ItemAddress(wsState.menuStrip, menuCode);
                                 if (item) {
-                                    Printf("Workspace: Found menu item at 0x%08lX\n", (ULONG)item);
+                                    Printf("Workspace: Found menu item at 0x%lx\n", (ULONG)item);
                                     /* Get menu/item/sub numbers from UserData (GadTools stores it there) */
                                     if (GTMENUITEM_USERDATA(item)) {
                                         ULONG userData = (ULONG)GTMENUITEM_USERDATA(item);
@@ -541,8 +541,8 @@ int main(int argc, char *argv[])
                                         ULONG itemNumber = (userData >> 8) & 0xFF;
                                         ULONG subNumber = userData & 0xFF;
                                         
-                                        Printf("Workspace: Menu item - menuNumber=%lu, itemNumber=%lu, subNumber=%lu, Flags=0x%04X\n",
-                                               menuNumber, itemNumber, subNumber, item->Flags);
+                                        Printf("Workspace: Menu item - menuNumber=%lu, itemNumber=%lu, subNumber=%lu, Flags=0x%x\n",
+                                               menuNumber, itemNumber, subNumber, (UWORD)item->Flags);
                                         
                                         if (menuNumber == 0) {
                                             if (itemNumber == 0) {
@@ -660,7 +660,7 @@ int main(int argc, char *argv[])
                                     }
                                     menuCode = item->NextSelect;
                                 } else {
-                                    Printf("Workspace: WARNING - ItemAddress returned NULL for menuCode=0x%04X\n", menuCode);
+                                    Printf("Workspace: WARNING - ItemAddress returned NULL for menuCode=0x%x\n", menuCode);
                                     break;
                                 }
                             }
@@ -764,7 +764,7 @@ int main(int argc, char *argv[])
     /* Expected: visitor count should be 1 (only backdrop window is open) */
     {
         WORD visitorCount = CheckWorkspaceVisitors();
-        Printf("Workspace: Visitor count: %d\n", (int)visitorCount);
+        Printf("Workspace: Visitor count: %d\n", visitorCount);
         
         if (visitorCount == 0) {
             /* ERROR: Should have at least the backdrop window (count = 1) */
@@ -801,7 +801,7 @@ int main(int argc, char *argv[])
             /* Subtract 1 for the backdrop window when showing message */
             {
                 WORD otherWindows = visitorCount - 1;
-                Printf("Workspace: %d visitor window(s) total (1 backdrop + %d others)\n", (int)visitorCount, (int)otherWindows);
+                Printf("Workspace: %d visitor window(s) total (1 backdrop + %d others)\n", visitorCount, otherWindows);
             }
             Printf("Workspace: Showing requester and aborting cleanup - app will continue running\n");
             
@@ -1037,7 +1037,7 @@ BOOL InitializeCommodity(VOID)
     {
         LONG objError = CxObjError(broker);
         if (objError) {
-            Printf("Workspace: WARNING - Broker created but has errors (0x%08lX), continuing without commodity support\n", objError);
+            Printf("Workspace: WARNING - Broker created but has errors (0x%lx), continuing without commodity support\n", (ULONG)objError);
             /* Broker created but has errors - cleanup */
             DeleteCxObjAll(broker);
             broker = NULL;
@@ -1059,7 +1059,7 @@ BOOL InitializeCommodity(VOID)
         if (wsState.commodityFilter) {
             LONG filterError = CxObjError(wsState.commodityFilter);
             if (filterError) {
-                Printf("Workspace: WARNING - Filter has errors (0x%08lX)\n", filterError);
+                Printf("Workspace: WARNING - Filter has errors (0x%lx)\n", (ULONG)filterError);
                 DeleteCxObj(wsState.commodityFilter);
                 wsState.commodityFilter = NULL;
             } else {
@@ -1215,7 +1215,7 @@ BOOL CreateWorkspaceScreen(VOID)
             Printf("Workspace: Screen is now public\n");
         } else {
             /* Bit 0 = 1 means screen was already public or error occurred */
-            Printf("Workspace: WARNING - Screen was already public or error (status: 0x%04X)\n", statusResult);
+            Printf("Workspace: WARNING - Screen was already public or error (status: 0x%x)\n", statusResult);
             /* Continue anyway */
         }
     }
@@ -1268,7 +1268,7 @@ BOOL CloseWorkspaceScreen(VOID)
             UnlockPubScreenList();
         }
         
-        Printf("Workspace: Total visitor windows on all Workspace screens: %d\n", (int)visitorCount);
+        Printf("Workspace: Total visitor windows on all Workspace screens: %d\n", visitorCount);
         
         /* Check if we can close - no visitors allowed */
         if (visitorCount > 0) {
@@ -1299,7 +1299,7 @@ BOOL CloseWorkspaceScreen(VOID)
                 }
                 EasyRequestArgs(reqWindow, &es, NULL, NULL);
             }
-        Printf("Workspace: Cannot close - %d visitor windows still open, user must close them\n", (int)visitorCount);
+        Printf("Workspace: Cannot close - %d visitor windows still open, user must close them\n", visitorCount);
         /* Return FALSE - screen was not closed */
         return FALSE;
         }
@@ -1310,7 +1310,7 @@ BOOL CloseWorkspaceScreen(VOID)
             UWORD statusResult = PubScreenStatus(wsState.workspaceScreen, PSNF_PRIVATE);
             if ((statusResult & 0x0001) == 0) {
                 /* Bit 0 = 0 means can't make private (visitors are open) */
-                Printf("Workspace: WARNING - Could not make screen private (status: 0x%04X), may have visitors\n", statusResult);
+                Printf("Workspace: WARNING - Could not make screen private (status: 0x%x), may have visitors\n", statusResult);
                 /* Show warning and return */
                 titleStr = "Cannot Close Screen";
                 textStr = "Cannot close Workspace screen.\n\nAll windows on this screen must be closed before exiting.\n\nPlease close all windows and try again.";
@@ -1457,11 +1457,11 @@ BOOL CreateBackdropWindow(VOID)
         return FALSE;
     }
     
-    Printf("Workspace: Window opened successfully: 0x%08lX\n", (ULONG)wsState.backdropWindow);
+    Printf("Workspace: Window opened successfully: 0x%lx\n", (ULONG)wsState.backdropWindow);
     Printf("Workspace: Window actual dimensions: LeftEdge=%ld, TopEdge=%ld, Width=%ld, Height=%ld\n",
            (LONG)wsState.backdropWindow->LeftEdge, (LONG)wsState.backdropWindow->TopEdge,
            (LONG)wsState.backdropWindow->Width, (LONG)wsState.backdropWindow->Height);
-    Printf("Workspace: Window Flags: 0x%08lX\n", wsState.backdropWindow->Flags);
+    Printf("Workspace: Window Flags: 0x%lx\n", (ULONG)wsState.backdropWindow->Flags);
     
     /* Check if window was created with valid dimensions */
     if (wsState.backdropWindow->Width == 0 || wsState.backdropWindow->Height == 0) {
@@ -1478,7 +1478,7 @@ BOOL CreateBackdropWindow(VOID)
         } else {
             signalBit = -1;
         }
-        Printf("Workspace: Window UserPort: 0x%08lX, Signal bit: %ld\n", 
+        Printf("Workspace: Window UserPort: 0x%lx, Signal bit: %ld\n", 
                (ULONG)wsState.backdropWindow->UserPort, signalBit);
     }
     
@@ -1561,10 +1561,10 @@ WORD GetVisitorWindows(struct WindowInfo *windows, WORD maxWindows, BOOL exclude
     
     /* Iterate through all windows on the screen */
     win = wsState.workspaceScreen->FirstWindow;
-    Printf("Workspace: GetVisitorWindows - backdropWindow=0x%08lX, shellWindow=0x%08lX\n",
+    Printf("Workspace: GetVisitorWindows - backdropWindow=0x%lx, shellWindow=0x%lx\n",
            (ULONG)wsState.backdropWindow, (ULONG)wsState.shellWindow);
     while (win != NULL && count < maxWindows) {
-        Printf("Workspace: GetVisitorWindows - checking window 0x%08lX\n", (ULONG)win);
+        Printf("Workspace: GetVisitorWindows - checking window 0x%lx\n", (ULONG)win);
         
         /* ALWAYS skip backdrop window - it's our own window, never tile it */
         if (win == wsState.backdropWindow) {
@@ -1598,7 +1598,7 @@ WORD GetVisitorWindows(struct WindowInfo *windows, WORD maxWindows, BOOL exclude
             if (win->TopEdge >= expectedTop - 20 && win->TopEdge <= expectedTop + 20 &&
                 win->Height >= expectedHeight - 20 && win->Height <= expectedHeight + 20) {
                 Printf("Workspace: GetVisitorWindows - skipping shell window (by characteristics: TopEdge=%d, Height=%d, expected Top=%d, Height=%d)\n",
-                       (int)win->TopEdge, (int)win->Height, (int)expectedTop, (int)expectedHeight);
+                       win->TopEdge, win->Height, expectedTop, expectedHeight);
                 win = win->NextWindow;
                 continue;
             }
@@ -1607,7 +1607,7 @@ WORD GetVisitorWindows(struct WindowInfo *windows, WORD maxWindows, BOOL exclude
         /* Store window info */
         windows[count].window = win;
         windows[count].isShellWindow = FALSE;  /* We've already excluded shell window above */
-        Printf("Workspace: GetVisitorWindows - including window 0x%08lX in tiling list\n", (ULONG)win);
+        Printf("Workspace: GetVisitorWindows - including window 0x%lx in tiling list\n", (ULONG)win);
         
         /* Check if window is resizable */
         /* Windows with WFLG_SIZEGADGET or WFLG_DRAGBAR are typically resizable */
@@ -1621,9 +1621,12 @@ WORD GetVisitorWindows(struct WindowInfo *windows, WORD maxWindows, BOOL exclude
         windows[count].maxHeight = win->WScreen->Height - titleBarHeight;
         
         count++;
+        Printf("Workspace: GetVisitorWindows - count is now %d after including window 0x%lx\n", 
+               count, (ULONG)win);
         win = win->NextWindow;
     }
     
+    Printf("Workspace: GetVisitorWindows - final count before return: %d\n", count);
     return count;
 }
 
@@ -1662,14 +1665,14 @@ VOID TileWindowsHorizontally(VOID)
     /* Get all visitor windows (excluding backdrop, excluding shell) */
     Printf("Workspace: Getting visitor windows...\n");
     windowCount = GetVisitorWindows(windows, 32, TRUE);
-    Printf("Workspace: GetVisitorWindows returned %d windows\n", (int)windowCount);
+    Printf("Workspace: GetVisitorWindows returned %d windows\n", windowCount);
     
     if (windowCount == 0) {
         Printf("Workspace: No windows to tile - returning early\n");
         return;
     }
     
-    Printf("Workspace: Tiling %d windows horizontally\n", (int)windowCount);
+    Printf("Workspace: Tiling %d windows horizontally\n", windowCount);
     
     /* Calculate window dimensions - prevent division by zero */
     if (windowCount == 0) {
@@ -1686,23 +1689,46 @@ VOID TileWindowsHorizontally(VOID)
     windowTop = titleBarHeight;
     
     Printf("Workspace: Calculated windowWidth=%d, windowHeight=%d, windowTop=%d\n", 
-           (int)windowWidth, (int)windowHeight, (int)windowTop);
+           windowWidth, windowHeight, windowTop);
     
     /* Tile windows */
-    Printf("Workspace: Starting tile loop for %d windows\n", (int)windowCount);
+    Printf("Workspace: Starting tile loop for %d windows\n", windowCount);
+    
+    /* Safety check - should never happen if early return worked */
+    if (windowCount == 0 || windowCount > 32) {
+        Printf("Workspace: ERROR - invalid windowCount=%d, aborting tile operation\n", windowCount);
+        return;
+    }
+    
     for (i = 0; i < windowCount; i++) {
-        Printf("Workspace: Tiling window %d of %d\n", (int)(i + 1), (int)windowCount);
+        /* Safety check - ensure window pointer is valid */
+        if (windows[i].window == NULL) {
+            Printf("Workspace: ERROR - window[%d] is NULL, skipping\n", i);
+            continue;
+        }
+        
+        Printf("Workspace: Tiling window %d of %d (window=0x%lx, resizable=%s)\n", 
+               i + 1, windowCount, (ULONG)windows[i].window,
+               windows[i].isResizable ? "YES" : "NO");
         windowLeft = i * windowWidth;
         
         /* For resizable windows, resize them */
         if (windows[i].isResizable) {
+            Printf("Workspace: Calling ChangeWindowBox for window %d: left=%d, top=%d, width=%d, height=%d\n",
+                   i, windowLeft, windowTop, windowWidth, windowHeight);
             ChangeWindowBox(windows[i].window, windowLeft, windowTop, windowWidth, windowHeight);
         } else {
             /* For fixed-size windows, just move them */
+            Printf("Workspace: Calling MoveWindow for window %d: deltaX=%d, deltaY=%d\n",
+                   i, 
+                   windowLeft - windows[i].window->LeftEdge,
+                   windowTop - windows[i].window->TopEdge);
             MoveWindow(windows[i].window, windowLeft - windows[i].window->LeftEdge, 
                       windowTop - windows[i].window->TopEdge);
         }
+        Printf("Workspace: Finished tiling window %d\n", i);
     }
+    Printf("Workspace: Finished tiling all %d windows\n", windowCount);
 }
 
 /* Tile windows vertically */
@@ -1745,7 +1771,7 @@ VOID TileWindowsVertically(VOID)
         return;
     }
     
-    Printf("Workspace: Tiling %d windows vertically\n", (int)windowCount);
+    Printf("Workspace: Tiling %d windows vertically\n", windowCount);
     
     /* Calculate window dimensions - prevent division by zero */
     if (windowCount == 0) {
@@ -1820,7 +1846,7 @@ VOID TileWindowsGrid(VOID)
         return;
     }
     
-    Printf("Workspace: Tiling %d windows in grid\n", (int)windowCount);
+    Printf("Workspace: Tiling %d windows in grid\n", windowCount);
     
     /* Calculate grid dimensions (aim for roughly square grid) */
     cols = (WORD)((windowCount + 1) / 2);  /* Roughly square */
@@ -1889,7 +1915,7 @@ VOID CascadeWindows(VOID)
         return;
     }
     
-    Printf("Workspace: Cascading %d windows\n", (int)windowCount);
+    Printf("Workspace: Cascading %d windows\n", windowCount);
     
     /* Cascade windows with offset */
     for (i = 0; i < windowCount; i++) {
@@ -1950,7 +1976,7 @@ VOID MaximizeAllWindows(VOID)
         return;
     }
     
-    Printf("Workspace: Maximizing %d windows\n", (int)windowCount);
+    Printf("Workspace: Maximizing %d windows\n", windowCount);
     
     windowLeft = 0;
     windowTop = titleBarHeight;
@@ -2074,10 +2100,10 @@ BOOL HandleCloseMenu(VOID)
     /* Check for visitor windows before allowing quit */
     Printf("Workspace: HandleCloseMenu called - checking for visitors...\n");
     visitorCount = CheckWorkspaceVisitors();
-    Printf("Workspace: Visitor count: %d\n", (int)visitorCount);
+    Printf("Workspace: Visitor count: %d\n", visitorCount);
     if (visitorCount > 0) {
         /* Show EasyRequest dialog warning user */
-        Printf("Workspace: Visitors detected (%d windows) - showing warning dialog\n", (int)visitorCount);
+        Printf("Workspace: Visitors detected (%d windows) - showing warning dialog\n", visitorCount);
         titleStr = "Cannot Exit Workspace";
         
         /* Format message with visitor count */
@@ -2450,7 +2476,7 @@ BOOL CreateMenuStrip(VOID)
         return FALSE;
     }
     
-    Printf("Workspace: Menu strip verified in window (MenuStrip=0x%08lX)\n", (ULONG)wsState.backdropWindow->MenuStrip);
+    Printf("Workspace: Menu strip verified in window (MenuStrip=0x%lx)\n", (ULONG)wsState.backdropWindow->MenuStrip);
     
     /* Free visual info (no longer needed after LayoutMenus and SetMenuStrip) */
     FreeVisualInfo(visInfo);
@@ -2532,7 +2558,7 @@ BOOL CreateShellWindow(VOID)
         return FALSE;
     }
     
-    Printf("Workspace: Shell window opened successfully: 0x%08lX\n", (ULONG)wsState.shellWindow);
+    Printf("Workspace: Shell window opened successfully: 0x%lx\n", (ULONG)wsState.shellWindow);
     Printf("Workspace: Shell window dimensions: LeftEdge=%ld, TopEdge=%ld, Width=%ld, Height=%ld\n",
            (LONG)wsState.shellWindow->LeftEdge, (LONG)wsState.shellWindow->TopEdge,
            (LONG)wsState.shellWindow->Width, (LONG)wsState.shellWindow->Height);
@@ -2599,7 +2625,7 @@ BOOL CreateShellConsole(VOID)
             conspec = conspecBuffer;
             
             Printf("Workspace: CON: specifier: '%s'\n", conspec);
-            Printf("Workspace: Shell window pointer: 0x%08lX\n", windowAddr);
+            Printf("Workspace: Shell window pointer: 0x%lx\n", windowAddr);
         }
     }
     
