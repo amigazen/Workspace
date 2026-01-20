@@ -135,6 +135,8 @@ BOOL GetToolType(STRPTR toolType, STRPTR defaultValue, STRPTR buffer, ULONG buff
 BOOL InitializeTimer(VOID);
 VOID CleanupTimer(VOID);
 STRPTR FormatTimeDate(STRPTR buffer, ULONG bufferSize);
+VOID HandleThemeMenu(ULONG itemNumber);  /* Handle Theme menu items */
+BOOL ApplyTheme(ULONG themeIndex);  /* Apply color theme to screen */
 
 /* Version string */
 static const char *verstag = "$VER: Workspace 47.1 (1.1.2026)\n";
@@ -172,6 +174,11 @@ struct WorkspaceState {
     BOOL commodityActive;  /* Track broker activation state */
     BOOL isDefaultScreen;  /* Track if this screen is set as default */
     struct RDArgs *rda;  /* ReadArgs result for cleanup */
+    ULONG currentTheme;  /* Current color theme index (0 = Like Workbench) */
+    STRPTR themeName;  /* Command line theme name */
+    ULONG originalRGB[256 * 3]; /* Original palette captured when screen opened (GetRGB32 format) */
+    ULONG numColors; /* Number of colors captured in originalRGB (<=256) */
+    BOOL haveOriginalPalette; /* TRUE if originalRGB/numColors is valid */
 };
 
 static struct WorkspaceState wsState;
@@ -182,6 +189,25 @@ static struct WorkspaceState wsState;
 static STRPTR defaultShellPath = NULL;  /* Will use WINDOW parameter by default */
 static BOOL defaultShellEnabled = FALSE;
 static STRPTR defaultBackdropImage = NULL;
+
+/* Color theme definitions */
+/* Theme indices: 0=Like Workbench, 1=Dark Mode, 2=Sepia, 3=Blue, 4=Green */
+#define THEME_LIKE_WORKBENCH 0
+#define THEME_DARK_MODE 1
+#define THEME_SEPIA 2
+#define THEME_BLUE 3
+#define THEME_GREEN 4
+#define THEME_COUNT 5
+
+/* Theme names for menu */
+static const STRPTR themeNames[] = {
+    "Like Workbench",
+    "Dark Mode",
+    "Sepia",
+    "Blue",
+    "Green",
+    NULL
+};
 
 /* Main entry point */
 int main(int argc, char *argv[])
@@ -200,6 +226,7 @@ int main(int argc, char *argv[])
     wsState.commodityActive = FALSE;
     wsState.isDefaultScreen = FALSE;
     wsState.mainTask = (struct Task *)FindTask(NULL);
+    wsState.currentTheme = THEME_LIKE_WORKBENCH;  /* Default to Like Workbench */
     
     Printf("Workspace: State initialized\n");
     
@@ -283,6 +310,14 @@ int main(int argc, char *argv[])
         return RETURN_FAIL;
     }
     Printf("Workspace: Workspace screen created successfully\n");
+    
+    /* Apply theme if specified (and not Like Workbench) */
+    if (wsState.currentTheme != THEME_LIKE_WORKBENCH) {
+        Printf("Workspace: Applying theme %lu: %s\n", wsState.currentTheme, themeNames[wsState.currentTheme]);
+        if (!ApplyTheme(wsState.currentTheme)) {
+            Printf("Workspace: WARNING - Failed to apply theme, continuing with default\n");
+        }
+    }
     
     /* Create backdrop window first - menu will be created after window is open */
     Printf("Workspace: Creating backdrop window...\n");
@@ -652,6 +687,9 @@ int main(int argc, char *argv[])
                                         } else if (menuNumber == 1) {
                                             /* Windows menu */
                                             HandleWindowsMenu(itemNumber);
+                                        } else if (menuNumber == 2) {
+                                            /* Prefs menu */
+                                            HandleThemeMenu(subNumber);
                                         } else {
                                             Printf("Workspace: Unknown menu number: %lu\n", menuNumber);
                                         }
@@ -1144,6 +1182,7 @@ BOOL CreateWorkspaceScreen(VOID)
 {
     struct Screen *newScreen;
     LONG screenError = 0;
+    ULONG numColors;
     
     /* Create screen using SA_LikeWorkbench (like example.c) */
     Printf("Workspace: Opening screen with SA_LikeWorkbench...\n");
@@ -1225,6 +1264,19 @@ BOOL CreateWorkspaceScreen(VOID)
                (LONG)newScreen->Width, (LONG)newScreen->Height);
     
     wsState.workspaceScreen = newScreen;
+
+    /* Capture original palette immediately after opening the screen */
+    wsState.haveOriginalPalette = FALSE;
+    wsState.numColors = 0;
+    numColors = 1UL << newScreen->BitMap.Depth;
+    if (numColors > 256) {
+        numColors = 256;
+    }
+    if (newScreen->ViewPort.ColorMap != NULL && numColors > 0) {
+        GetRGB32(newScreen->ViewPort.ColorMap, 0, numColors, wsState.originalRGB);
+        wsState.numColors = numColors;
+        wsState.haveOriginalPalette = TRUE;
+    }
     
     return TRUE;
 }
@@ -1872,23 +1924,73 @@ VOID TileWindowsGrid(VOID)
     windowWidth = screenWidth / cols;
     windowHeight = usableHeight / rows;
     
+    /* Validate calculated dimensions */
+    if (windowWidth == 0 || windowHeight == 0) {
+        Printf("Workspace: ERROR - Invalid grid dimensions (windowWidth=%ld, windowHeight=%ld, cols=%ld, rows=%ld)\n",
+               (LONG)windowWidth, (LONG)windowHeight, (LONG)cols, (LONG)rows);
+        return;
+    }
+    
+    Printf("Workspace: Grid layout - cols=%ld, rows=%ld, windowWidth=%ld, windowHeight=%ld\n",
+           (LONG)cols, (LONG)rows, (LONG)windowWidth, (LONG)windowHeight);
+    
     /* Tile windows in grid */
     for (i = 0; i < windowCount; i++) {
+        /* Safety check */
+        if (windows[i].window == NULL) {
+            Printf("Workspace: ERROR - window[%ld] is NULL, skipping\n", (LONG)i);
+            continue;
+        }
+        
         row = i / cols;
         col = i % cols;
         
         windowLeft = col * windowWidth;
         windowTop = titleBarHeight + (row * windowHeight);
         
+        Printf("Workspace: Tiling window %ld of %ld (row=%ld, col=%ld, left=%ld, top=%ld, width=%ld, height=%ld)\n",
+               (LONG)(i + 1), (LONG)windowCount, (LONG)row, (LONG)col, 
+               (LONG)windowLeft, (LONG)windowTop, (LONG)windowWidth, (LONG)windowHeight);
+        
+        /* Validate window pointer and dimensions before operations */
+        if (windows[i].window == NULL) {
+            Printf("Workspace: ERROR - window[%ld] is NULL, skipping\n", (LONG)i);
+            continue;
+        }
+        
+        /* Validate dimensions are positive */
+        if (windowWidth <= 0 || windowHeight <= 0) {
+            Printf("Workspace: ERROR - Invalid dimensions for window[%ld] (width=%ld, height=%ld), skipping\n",
+                   (LONG)i, (LONG)windowWidth, (LONG)windowHeight);
+            continue;
+        }
+        
+        /* Validate window is on our screen */
+        if (windows[i].window->WScreen != wsState.workspaceScreen) {
+            Printf("Workspace: ERROR - window[%ld] is not on workspace screen, skipping\n", (LONG)i);
+            continue;
+        }
+        
         /* For resizable windows, resize them */
         if (windows[i].isResizable) {
+            Printf("Workspace: Calling ChangeWindowBox for window %ld\n", (LONG)i);
             ChangeWindowBox(windows[i].window, windowLeft, windowTop, windowWidth, windowHeight);
+            Printf("Workspace: ChangeWindowBox completed for window %ld\n", (LONG)i);
         } else {
             /* For fixed-size windows, just move them */
-            MoveWindow(windows[i].window, windowLeft - windows[i].window->LeftEdge, 
-                      windowTop - windows[i].window->TopEdge);
+            /* Calculate delta values */
+            {
+                WORD deltaX = windowLeft - windows[i].window->LeftEdge;
+                WORD deltaY = windowTop - windows[i].window->TopEdge;
+                Printf("Workspace: Calling MoveWindow for window %ld (deltaX=%ld, deltaY=%ld)\n", 
+                       (LONG)i, (LONG)deltaX, (LONG)deltaY);
+                MoveWindow(windows[i].window, deltaX, deltaY);
+                Printf("Workspace: MoveWindow completed for window %ld\n", (LONG)i);
+            }
         }
     }
+    
+    Printf("Workspace: Finished tiling all %ld windows in grid\n", (LONG)windowCount);
 }
 
 /* Cascade windows */
@@ -2036,6 +2138,136 @@ VOID HandleWindowsMenu(ULONG itemNumber)
     }
     
     Printf("Workspace: HandleWindowsMenu returning\n");
+}
+
+/* Handle Theme menu items */
+VOID HandleThemeMenu(ULONG itemNumber)
+{
+    Printf("Workspace: HandleThemeMenu called with itemNumber=%lu\n", itemNumber);
+    
+    /* itemNumber is the theme index (0-4) */
+    if (itemNumber < THEME_COUNT) {
+        if (itemNumber == wsState.currentTheme) {
+            Printf("Workspace: Theme already active, ignoring\n");
+            return;
+        }
+        Printf("Workspace: Applying theme %lu: %s\n", itemNumber, themeNames[itemNumber]);
+        if (ApplyTheme(itemNumber)) {
+            wsState.currentTheme = itemNumber;
+            Printf("Workspace: Theme applied successfully\n");
+        } else {
+            Printf("Workspace: ERROR - Failed to apply theme\n");
+        }
+    } else {
+        Printf("Workspace: Unknown theme index: %lu\n", itemNumber);
+    }
+}
+
+/* Apply color theme to screen */
+BOOL ApplyTheme(ULONG themeIndex)
+{
+    struct ColorMap *colorMap;
+    ULONG numColors;
+    ULONG i;
+    UBYTE r, g, b;
+    ULONG srcR, srcG, srcB;
+    ULONG brightness;
+    ULONG invertedBrightness;
+    ULONG gray;
+    
+    if (!wsState.workspaceScreen) {
+        Printf("Workspace: ERROR - No screen available for theme\n");
+        return FALSE;
+    }
+    
+    colorMap = wsState.workspaceScreen->ViewPort.ColorMap;
+    if (!colorMap) {
+        Printf("Workspace: ERROR - No ColorMap available\n");
+        return FALSE;
+    }
+    
+    /* Always base themes on the original palette captured at screen open */
+    if (!wsState.haveOriginalPalette) {
+        Printf("Workspace: ERROR - No original palette captured\n");
+        return FALSE;
+    }
+    numColors = wsState.numColors;
+    if (numColors == 0 || numColors > 256) {
+        Printf("Workspace: ERROR - Invalid numColors in original palette: %lu\n", numColors);
+        return FALSE;
+    }
+    
+    Printf("Workspace: Applying theme %lu to screen with %lu colors\n", themeIndex, numColors);
+    
+    /* Like Workbench restores the original palette captured at open */
+    if (themeIndex == THEME_LIKE_WORKBENCH) {
+        for (i = 0; i < numColors; i++) {
+            srcR = wsState.originalRGB[i * 3] >> 24;
+            srcG = wsState.originalRGB[i * 3 + 1] >> 24;
+            srcB = wsState.originalRGB[i * 3 + 2] >> 24;
+            SetRGB32(&wsState.workspaceScreen->ViewPort, i,
+                     (ULONG)srcR << 24, (ULONG)srcG << 24, (ULONG)srcB << 24);
+        }
+        Printf("Workspace: Restored original palette\n");
+        return TRUE;
+    }
+    
+    /* Apply theme colors based on theme index */
+    for (i = 0; i < numColors; i++) {
+        /* Source color always from original palette (stable baseline) */
+        srcR = wsState.originalRGB[i * 3] >> 24;
+        srcG = wsState.originalRGB[i * 3 + 1] >> 24;
+        srcB = wsState.originalRGB[i * 3 + 2] >> 24;
+        r = (UBYTE)srcR;
+        g = (UBYTE)srcG;
+        b = (UBYTE)srcB;
+        
+        switch (themeIndex) {
+            case THEME_DARK_MODE:
+                /* Dark mode: invert colors and reduce brightness */
+                brightness = ((ULONG)r + (ULONG)g + (ULONG)b) / 3;
+                invertedBrightness = 255 - brightness;
+                /* Scale to dark range (0-128) */
+                r = (UBYTE)((invertedBrightness * 128) / 255);
+                g = (UBYTE)((invertedBrightness * 128) / 255);
+                b = (UBYTE)((invertedBrightness * 128) / 255);
+                break;
+            
+            case THEME_SEPIA:
+                /* Sepia: warm brown tones */
+                gray = ((ULONG)r + (ULONG)g + (ULONG)b) / 3;
+                r = (UBYTE)((gray * 240) / 255);  /* Warm red */
+                g = (UBYTE)((gray * 220) / 255);  /* Warm green */
+                b = (UBYTE)((gray * 180) / 255); /* Warm blue (reduced) */
+                break;
+            
+            case THEME_BLUE:
+                /* Blue theme: cool blue tones */
+                gray = ((ULONG)r + (ULONG)g + (ULONG)b) / 3;
+                r = (UBYTE)((gray * 180) / 255);  /* Reduced red */
+                g = (UBYTE)((gray * 200) / 255);  /* Slightly reduced green */
+                b = (UBYTE)((gray * 240) / 255);  /* Enhanced blue */
+                break;
+            
+            case THEME_GREEN:
+                /* Green theme: natural green tones */
+                gray = ((ULONG)r + (ULONG)g + (ULONG)b) / 3;
+                r = (UBYTE)((gray * 200) / 255);  /* Slightly reduced red */
+                g = (UBYTE)((gray * 240) / 255);  /* Enhanced green */
+                b = (UBYTE)((gray * 200) / 255);  /* Slightly reduced blue */
+                break;
+            
+            default:
+                /* Keep original color */
+                break;
+        }
+        
+        /* Set the color using SetRGB32 */
+        SetRGB32(&wsState.workspaceScreen->ViewPort, i, (ULONG)r << 24, (ULONG)g << 24, (ULONG)b << 24);
+    }
+    
+    Printf("Workspace: Theme applied to %lu colors\n", numColors);
+    return TRUE;
 }
 
 VOID HandleShellConsoleMenu(VOID)
@@ -2394,7 +2626,70 @@ struct NewMenu *BuildDefaultPubScreenMenu(ULONG *menuCount)
     newMenu[idx].nm_UserData = (APTR)((1UL << 16) | (2UL << 8) | 0UL); /* Menu 1, Item 2, Sub 0 */
     idx++;
     
-    /* Terminate second menu (this also terminates the entire menu strip) */
+    /* Ensure we have enough space for third menu (Prefs) */
+    if (idx >= maxCount + 5) {
+        /* Need more space - reallocate */
+        maxCount *= 2;
+        newMenu2 = AllocMem(sizeof(struct NewMenu) * (maxCount + 10), MEMF_CLEAR);
+        if (!newMenu2) {
+            Printf("Workspace: ERROR - Failed to reallocate menu array for third menu\n");
+            FreeMem(newMenu, sizeof(struct NewMenu) * (maxCount / 2 + 10));
+            return NULL;
+        }
+        CopyMem(newMenu, newMenu2, sizeof(struct NewMenu) * idx);
+        FreeMem(newMenu, sizeof(struct NewMenu) * (maxCount / 2 + 10));
+        newMenu = newMenu2;
+    }
+    
+    /* Start third menu - Prefs (NO NM_END between menus!) */
+    newMenu[idx].nm_Type = NM_TITLE;
+    newMenu[idx].nm_Label = "Prefs";
+    newMenu[idx].nm_CommKey = NULL;
+    newMenu[idx].nm_Flags = 0;
+    newMenu[idx].nm_MutualExclude = 0;
+    newMenu[idx].nm_UserData = NULL;
+    idx++;
+    
+    /* Add "Theme" menu item */
+    newMenu[idx].nm_Type = NM_ITEM;
+    newMenu[idx].nm_Label = "Theme";
+    newMenu[idx].nm_CommKey = NULL;
+    newMenu[idx].nm_Flags = 0;
+    newMenu[idx].nm_MutualExclude = 0;
+    newMenu[idx].nm_UserData = NULL;
+    idx++;
+    
+    /* Add theme sub-items with mutex */
+    {
+        ULONG themeSubIdx;
+        ULONG themeSubItemCount = THEME_COUNT;
+        ULONG themeStartIdx = idx;
+        
+        for (themeSubIdx = 0; themeSubIdx < themeSubItemCount; themeSubIdx++) {
+            STRPTR themeLabel = (STRPTR)themeNames[themeSubIdx];
+            ULONG checkFlags = CHECKIT;
+            
+            /* Mark current theme as checked */
+            if (themeSubIdx == wsState.currentTheme) {
+                checkFlags |= CHECKED;
+            }
+            
+            newMenu[idx].nm_Type = NM_SUB;
+            newMenu[idx].nm_Label = themeLabel;
+            newMenu[idx].nm_Flags = checkFlags;
+            newMenu[idx].nm_MutualExclude = 0; /* Will be set after loop */
+            newMenu[idx].nm_UserData = (APTR)((2UL << 16) | (0UL << 8) | themeSubIdx); /* Menu 2, Item 0, Sub themeSubIdx */
+            idx++;
+        }
+        
+        /* Set mutual exclusion for theme sub-items */
+        for (themeSubIdx = 0; themeSubIdx < themeSubItemCount; themeSubIdx++) {
+            ULONG excludeMask = ((1UL << themeSubItemCount) - 1) & ~(1UL << themeSubIdx);
+            newMenu[themeStartIdx + themeSubIdx].nm_MutualExclude = excludeMask;
+        }
+    }
+    
+    /* Terminate third menu (this also terminates the entire menu strip) */
     newMenu[idx].nm_Type = NM_END;
     newMenu[idx].nm_Label = NULL;
     newMenu[idx].nm_CommKey = NULL;
@@ -2404,7 +2699,7 @@ struct NewMenu *BuildDefaultPubScreenMenu(ULONG *menuCount)
     idx++;
     
     *menuCount = idx;  /* Count includes final NM_END entry */
-    Printf("Workspace: Built menu with %lu items (%lu Workspace screens, 2 menus)\n", *menuCount, count);
+    Printf("Workspace: Built menu with %lu items (%lu Workspace screens, 3 menus)\n", *menuCount, count);
     return newMenu;
 }
 
@@ -2776,27 +3071,30 @@ VOID CloseShellConsole(VOID)
 /* Parse command line arguments */
 BOOL ParseCommandLine(VOID)
 {
-    LONG argArray[4];
+    LONG argArray[5];
     STRPTR pubNameArg = NULL;
     STRPTR cxNameArg = NULL;
     STRPTR backdropArg = NULL;
     STRPTR cxPopKeyArg = NULL;
+    STRPTR themeArg = NULL;
     static UBYTE pubNameBuffer[64];
     static UBYTE cxNameBuffer[64];
     static UBYTE backdropBuffer[256];
     static UBYTE cxPopKeyBuffer[64];
+    static UBYTE themeBuffer[64];
     
     /* Initialize arg array */
     argArray[0] = 0;
     argArray[1] = 0;
     argArray[2] = 0;
     argArray[3] = 0;
+    argArray[4] = 0;
     
     /* Clear IoErr before ReadArgs */
     SetIoErr(0);
     
-    /* Parse arguments: PUBNAME/K, CX_NAME/K, BACKDROP/K, CX_POPKEY/K */
-    wsState.rda = ReadArgs("PUBNAME/K,CX_NAME/K,BACKDROP/K,CX_POPKEY/K", argArray, NULL);
+    /* Parse arguments: PUBNAME/K, CX_NAME/K, BACKDROP/K, CX_POPKEY/K, THEME/K */
+    wsState.rda = ReadArgs("PUBNAME/K,CX_NAME/K,BACKDROP/K,CX_POPKEY/K,THEME/K", argArray, NULL);
     if (!wsState.rda) {
         LONG errorCode = IoErr();
         if (errorCode != 0) {
@@ -2808,6 +3106,7 @@ BOOL ParseCommandLine(VOID)
         wsState.cxName = NULL;
         wsState.backdropImagePath = NULL;
         wsState.cxPopKey = NULL;
+        wsState.themeName = NULL;
         return TRUE; /* Not a fatal error */
     }
     
@@ -2816,6 +3115,7 @@ BOOL ParseCommandLine(VOID)
     cxNameArg = (STRPTR)argArray[1];
     backdropArg = (STRPTR)argArray[2];
     cxPopKeyArg = (STRPTR)argArray[3];
+    themeArg = (STRPTR)argArray[4];
     
     /* Store pubname if provided */
     if (pubNameArg && pubNameArg[0] != '\0') {
@@ -2851,6 +3151,29 @@ BOOL ParseCommandLine(VOID)
         Printf("Workspace: CX_POPKEY set to: %s\n", wsState.cxPopKey);
     } else {
         wsState.cxPopKey = NULL;
+    }
+    
+    /* Store THEME if provided */
+    if (themeArg && themeArg[0] != '\0') {
+        SNPrintf(themeBuffer, sizeof(themeBuffer), "%s", themeArg);
+        wsState.themeName = themeBuffer;
+        Printf("Workspace: THEME set to: %s\n", wsState.themeName);
+        
+        /* Map theme name to index */
+        if (strcmp(themeArg, "dark") == 0 || strcmp(themeArg, "Dark Mode") == 0) {
+            wsState.currentTheme = THEME_DARK_MODE;
+        } else if (strcmp(themeArg, "sepia") == 0 || strcmp(themeArg, "Sepia") == 0) {
+            wsState.currentTheme = THEME_SEPIA;
+        } else if (strcmp(themeArg, "blue") == 0 || strcmp(themeArg, "Blue") == 0) {
+            wsState.currentTheme = THEME_BLUE;
+        } else if (strcmp(themeArg, "green") == 0 || strcmp(themeArg, "Green") == 0) {
+            wsState.currentTheme = THEME_GREEN;
+        } else {
+            /* Default to Like Workbench */
+            wsState.currentTheme = THEME_LIKE_WORKBENCH;
+        }
+    } else {
+        wsState.themeName = NULL;
     }
     
     return TRUE;

@@ -40,8 +40,8 @@ clean:
 
 # Install target
 install:
-	@echo "Installing Workspace to SDK/C..."
-	@copy $(PROGRAM) to /SDK/C/$(PROGRAM) CLONE
+	@echo "Installing Workspace to SDK/Tools..."
+	@copy $(PROGRAM) to /SDK/Tools/$(PROGRAM) CLONE
 
 # Dependencies
 workspace.o: workspace.c
