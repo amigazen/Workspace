@@ -29,7 +29,6 @@
 #include <libraries/commodities.h>
 #include <devices/input.h>
 #include <devices/inputevent.h>
-#include <devices/timer.h>
 #include <dos/datetime.h>
 #include <libraries/locale.h>
 #include <datatypes/datatypes.h>
@@ -48,7 +47,6 @@
 #include <proto/locale.h>
 #include <proto/datatypes.h>
 #include <proto/input.h>
-#include <proto/timer.h>
 #include <clib/alib_protos.h>
 #include <string.h>
 
@@ -99,9 +97,6 @@ struct GfxBase *GfxBase = NULL;
 struct MsgPort *InputPort = NULL;
 struct IOStdReq *InputIO = NULL;
 struct Library *InputBase = NULL;
-struct MsgPort *TimerPort = NULL;
-struct timerequest *TimerIO = NULL;
-struct Device *TimerBase = NULL;
 
 /* Forward declarations */
 VOID Cleanup(VOID);
@@ -118,7 +113,6 @@ BOOL CreateShellConsole(VOID);
 VOID CloseShellConsole(VOID);
 BOOL LoadBackdropImage(STRPTR imagePath);
 VOID FreeBackdropImage(VOID);
-VOID UpdateScreenTitle(VOID);
 VOID ProcessCommodityMessages(VOID);
 STRPTR GetWorkspaceName(VOID);
 VOID ParseToolTypes(VOID);
@@ -132,9 +126,6 @@ VOID HandleSetAsDefaultMenu(struct MenuItem *menuItem);
 VOID HandleDefaultPubScreenSubMenu(STRPTR screenName);
 struct NewMenu *BuildDefaultPubScreenMenu(ULONG *menuCount);
 BOOL GetToolType(STRPTR toolType, STRPTR defaultValue, STRPTR buffer, ULONG bufferSize);
-BOOL InitializeTimer(VOID);
-VOID CleanupTimer(VOID);
-STRPTR FormatTimeDate(STRPTR buffer, ULONG bufferSize);
 VOID HandleThemeMenu(ULONG itemNumber);  /* Handle Theme menu items */
 BOOL ApplyTheme(ULONG themeIndex);  /* Apply color theme to screen */
 
@@ -170,7 +161,6 @@ struct WorkspaceState {
     BOOL quitFlag;
     ULONG instanceNumber;
     struct DrawInfo *drawInfo;
-    ULONG lastMinute;
     BOOL commodityActive;  /* Track broker activation state */
     BOOL isDefaultScreen;  /* Track if this screen is set as default */
     struct RDArgs *rda;  /* ReadArgs result for cleanup */
@@ -258,15 +248,6 @@ int main(int argc, char *argv[])
     }
     Printf("Workspace: Libraries initialized successfully\n");
     
-    /* Initialize timer for time/date updates */
-    Printf("Workspace: Initializing timer...\n");
-    if (!InitializeTimer()) {
-        Printf("Workspace: ERROR - Failed to initialize timer\n");
-        Cleanup();
-        return RETURN_FAIL;
-    }
-    Printf("Workspace: Timer initialized successfully\n");
-    
     /* Parse command line arguments */
     Printf("Workspace: Parsing command line arguments...\n");
     if (!ParseCommandLine()) {
@@ -295,7 +276,6 @@ int main(int argc, char *argv[])
     Printf("Workspace: Initializing commodity...\n");
     if (!InitializeCommodity()) {
         Printf("Workspace: ERROR - Failed to initialize commodity\n");
-        CleanupTimer();
         Cleanup();
         return RETURN_FAIL;
     }
@@ -352,18 +332,6 @@ int main(int argc, char *argv[])
         CreateShellConsole();
     }
     
-    /* Update screen title bar */
-    UpdateScreenTitle();
-    
-    /* Initialize last minute for time update tracking */
-    {
-        struct timeval tv;
-        struct ClockData cd;
-        GetSysTime(&tv);
-        Amiga2Date(tv.tv_secs, &cd);
-        wsState.lastMinute = cd.min;
-    }
-    
     /* Main event loop */
     Printf("Workspace: Entering main event loop...\n");
     {
@@ -384,23 +352,12 @@ int main(int argc, char *argv[])
         }
         Printf("Workspace: Commodity port signal bit: %ld\n", commoditySigBit);
     }
-    {
-        LONG timerSigBit;
-        if (TimerPort) {
-            timerSigBit = TimerPort->mp_SigBit;
-        } else {
-            timerSigBit = -1;
-        }
-        Printf("Workspace: Timer port signal bit: %ld\n", timerSigBit);
-    }
-    
     event_loop_start:
     
     while (!wsState.quitFlag) {
         ULONG signals;
         ULONG windowSignal = 0;
         ULONG expectedSignals;
-        ULONG timerSignal = 0;
         
         /* Reset done at start of each iteration */
         done = FALSE;
@@ -439,18 +396,13 @@ int main(int argc, char *argv[])
             break;
         }
         
-        /* Set up timer signal if timer is available */
-        if (TimerPort) {
-            timerSignal = (1L << TimerPort->mp_SigBit);
-        }
-        
         /* Calculate expected signal mask */
         {
             ULONG commoditySignal = 0;
             if (wsState.commodityPort) {
                 commoditySignal = (1L << wsState.commodityPort->mp_SigBit);
             }
-            expectedSignals = windowSignal | commoditySignal | timerSignal | SIGBREAKF_CTRL_C;
+            expectedSignals = windowSignal | commoditySignal | SIGBREAKF_CTRL_C;
         }
         
         /* If no valid signals, we can't wait - exit */
@@ -468,35 +420,6 @@ int main(int argc, char *argv[])
             Printf("Workspace: Received CTRL-C break signal\n");
             wsState.quitFlag = TRUE;
             break;
-        }
-        
-        /* Process timer messages (minute updates) */
-        if (timerSignal && (signals & timerSignal)) {
-            struct Message *timerMsg = GetMsg(TimerPort);
-            if (timerMsg) {
-                ReplyMsg(timerMsg);
-                
-                /* Check if minute has changed */
-                {
-                    struct timeval tv;
-                    struct ClockData cd;
-                    GetSysTime(&tv);
-                    Amiga2Date(tv.tv_secs, &cd);
-                    if (cd.min != wsState.lastMinute) {
-                        wsState.lastMinute = cd.min;
-                        UpdateScreenTitle();
-                    }
-                }
-                
-                /* Re-send timer request for next minute */
-                if (TimerIO) {
-                    TimerIO->tr_node.io_Command = TR_ADDREQUEST;
-                    TimerIO->tr_node.io_Flags = 0;
-                    TimerIO->tr_time.tv_secs = 60;
-                    TimerIO->tr_time.tv_micro = 0;
-                    SendIO((struct IORequest *)TimerIO);
-                }
-            }
         }
         
         /* Process commodity messages */
@@ -897,7 +820,6 @@ int main(int argc, char *argv[])
     /* If we get here, cleanup was successful (visitorCount == 1 case) */
     /* Continue with remaining cleanup */
     CleanupCommodity();
-    CleanupTimer();
     
     /* Free command line arguments */
     if (wsState.rda) {
@@ -3283,118 +3205,6 @@ VOID FreeBackdropImage(VOID)
     }
 }
 
-/* Hook function for FormatDate */
-ULONG FormatDateHook(struct Hook *hook, ULONG obj, ULONG msg)
-{
-    UBYTE **buffer = (UBYTE **)hook->h_Data;
-    if (buffer && *buffer) {
-        **buffer = (UBYTE)msg;
-        (*buffer)++;
-    }
-    return 0;
-}
-
-/* Format time and date string using locale */
-STRPTR FormatTimeDate(STRPTR buffer, ULONG bufferSize)
-{
-    struct timeval tv;
-    struct ClockData cd;
-    struct DateStamp ds;
-    STRPTR timeStr = NULL;
-    STRPTR dateStr = NULL;
-    UBYTE tempBuffer[128];
-    UBYTE dateBuffer[64];
-    struct Hook dateHook;
-    UBYTE *hookBuffer;
-    
-    if (buffer == NULL || bufferSize == 0) {
-        return NULL;
-    }
-    
-    /* Get current time */
-    GetSysTime(&tv);
-    Amiga2Date(tv.tv_secs, &cd);
-    
-    /* Convert to DateStamp for locale formatting */
-    ds.ds_Days = tv.tv_secs / 86400;
-    ds.ds_Minute = (tv.tv_secs % 86400) / 60;
-    ds.ds_Tick = ((tv.tv_secs % 86400) % 60) * TICKS_PER_SECOND;
-    
-    if (LocaleBase) {
-        struct Locale *locale = NULL;
-        
-        /* Get locale if available */
-        locale = OpenLocale(NULL);
-        
-        if (locale) {
-            /* Format time using locale with hook */
-            hookBuffer = tempBuffer;
-            dateHook.h_Entry = (ULONG (*)())FormatDateHook;
-            dateHook.h_SubEntry = (ULONG (*)())FormatDateHook;
-            dateHook.h_Data = (APTR)&hookBuffer;
-            FormatDate(locale, "%H:%M", &ds, &dateHook);
-            *hookBuffer = '\0';
-            timeStr = tempBuffer;
-            
-            /* Format date using locale (short format) */
-            hookBuffer = dateBuffer;
-            dateHook.h_Entry = (ULONG (*)())FormatDateHook;
-            dateHook.h_SubEntry = (ULONG (*)())FormatDateHook;
-            dateHook.h_Data = (APTR)&hookBuffer;
-            FormatDate(locale, "%d-%b", &ds, &dateHook);
-            *hookBuffer = '\0';
-            dateStr = dateBuffer;
-            
-            CloseLocale(locale);
-        }
-    }
-    
-    /* Fallback if locale not available */
-    if (!timeStr) {
-        SNPrintf(tempBuffer, sizeof(tempBuffer), "%02ld:%02ld", cd.hour, cd.min);
-        timeStr = tempBuffer;
-    }
-    
-    if (!dateStr) {
-        static STRPTR monthNames[] = {
-            "Jan", "Feb", "Mar", "Apr", "May", "Jun",
-            "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"
-        };
-        if (cd.month >= 1 && cd.month <= 12) {
-            SNPrintf(dateBuffer, sizeof(dateBuffer), "%02ld-%s", cd.mday, monthNames[cd.month - 1]);
-        } else {
-            SNPrintf(dateBuffer, sizeof(dateBuffer), "%02ld-%02ld", cd.mday, cd.month);
-        }
-        dateStr = dateBuffer;
-    }
-    
-    /* Combine workspace name, time and date */
-    SNPrintf(buffer, bufferSize, "%s  %s %s", wsState.workspaceName, timeStr, dateStr);
-    
-    return buffer;
-}
-
-/* Update screen title bar */
-VOID UpdateScreenTitle(VOID)
-{
-    UBYTE titleBuffer[128];
-    STRPTR titleText;
-    
-    if (wsState.workspaceScreen == NULL) {
-        return;
-    }
-    
-    /* Format title with workspace name, time and date */
-    titleText = FormatTimeDate(titleBuffer, sizeof(titleBuffer));
-    
-    if (titleText) {
-        /* Set screen title */
-        /* Note: Screen title is set via SA_Title tag when opening screen */
-        /* For runtime updates, we may need to use a different approach */
-        /* For now, we'll store it for potential future use */
-    }
-}
-
 /* Process commodity messages from Exchange program */
 VOID ProcessCommodityMessages(VOID)
 {
@@ -3507,59 +3317,6 @@ BOOL GetToolType(STRPTR toolType, STRPTR defaultValue, STRPTR buffer, ULONG buff
         return TRUE;
     }
     return FALSE;
-}
-
-/* Initialize timer device for minute updates */
-BOOL InitializeTimer(VOID)
-{
-    TimerPort = CreateMsgPort();
-    if (TimerPort == NULL) {
-        return FALSE;
-    }
-    
-    TimerIO = (struct timerequest *)CreateIORequest(TimerPort, sizeof(struct timerequest));
-    if (TimerIO == NULL) {
-        DeleteMsgPort(TimerPort);
-        TimerPort = NULL;
-        return FALSE;
-    }
-    
-    if (OpenDevice("timer.device", UNIT_VBLANK, (struct IORequest *)TimerIO, 0) != 0) {
-        DeleteIORequest((struct IORequest *)TimerIO);
-        TimerIO = NULL;
-        DeleteMsgPort(TimerPort);
-        TimerPort = NULL;
-        return FALSE;
-    }
-    
-    TimerBase = TimerIO->tr_node.io_Device;
-    
-    /* Send initial timer request for 60 seconds */
-    TimerIO->tr_node.io_Command = TR_ADDREQUEST;
-    TimerIO->tr_node.io_Flags = 0;
-    TimerIO->tr_time.tv_secs = 60;
-    TimerIO->tr_time.tv_micro = 0;
-    SendIO((struct IORequest *)TimerIO);
-    
-    return TRUE;
-}
-
-/* Cleanup timer device */
-VOID CleanupTimer(VOID)
-{
-    if (TimerIO != NULL) {
-        AbortIO((struct IORequest *)TimerIO);
-        WaitIO((struct IORequest *)TimerIO);
-        CloseDevice((struct IORequest *)TimerIO);
-        DeleteIORequest((struct IORequest *)TimerIO);
-        TimerIO = NULL;
-        TimerBase = NULL;
-    }
-    
-    if (TimerPort != NULL) {
-        DeleteMsgPort(TimerPort);
-        TimerPort = NULL;
-    }
 }
 
 /* Cleanup libraries */
